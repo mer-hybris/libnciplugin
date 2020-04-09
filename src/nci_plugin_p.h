@@ -53,6 +53,12 @@ nci_target_new(
     const NciIntfActivationNtf* ntf)
     G_GNUC_INTERNAL;
 
+NfcInitiator*
+nci_initiator_new(
+    NciAdapter* adapter,
+    const NciIntfActivationNtf* ntf)
+    G_GNUC_INTERNAL;
+
 guint
 nci_target_presence_check(
     NfcTarget* target,
@@ -67,9 +73,15 @@ nci_adapter_reactivate(
     G_GNUC_INTERNAL;
 
 void
-nci_adapter_deactivate(
+nci_adapter_deactivate_target(
     NciAdapter* adapter,
     NfcTarget* target)
+    G_GNUC_INTERNAL;
+
+void
+nci_adapter_deactivate_initiator(
+    NciAdapter* adapter,
+    NfcInitiator* initiator)
     G_GNUC_INTERNAL;
 
 #endif /* NCI_PLUGIN_PRIVATE_H */
