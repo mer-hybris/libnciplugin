@@ -366,8 +366,11 @@ nci_adapter_presence_check_timer(
 {
     NciAdapter* self = THIS(user_data);
     NciAdapterPriv* priv = self->priv;
+    NfcTargetSequence* seq = self->target->sequence;
+    gboolean do_presence_check = !seq || (nfc_target_sequence_flags(seq)
+        & NFC_SEQUENCE_FLAG_ALLOW_PRESENCE_CHECK);
 
-    if (!priv->presence_check_id && !self->target->sequence) {
+    if (!priv->presence_check_id && do_presence_check) {
         priv->presence_check_id = nci_target_presence_check(self->target,
             nci_adapter_presence_check_done, self);
         if (!priv->presence_check_id) {
