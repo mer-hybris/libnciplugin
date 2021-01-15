@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2019-2020 Jolla Ltd.
- * Copyright (C) 2019-2020 Slava Monich <slava.monich@jolla.com>
+ * Copyright (C) 2019-2021 Jolla Ltd.
+ * Copyright (C) 2019-2021 Slava Monich <slava.monich@jolla.com>
  *
  * You may use this file under the terms of the BSD license as follows:
  *
@@ -41,7 +41,6 @@
 
 #include <nci_core.h>
 
-#include <nfc_tag.h>
 #include <nfc_target_impl.h>
 
 #define T2T_CMD_READ (0x30)
@@ -88,6 +87,17 @@ GType nci_target_get_type(void) G_GNUC_INTERNAL;
 #define THIS_TYPE (nci_target_get_type())
 #define THIS(obj) (G_TYPE_CHECK_INSTANCE_CAST((obj), THIS_TYPE, NciTarget))
 G_DEFINE_TYPE(NciTarget, nci_target, NFC_TYPE_TARGET)
+
+static
+NciTarget*
+nci_target_new_with_technology(
+    NFC_TECHNOLOGY technology)
+{
+    NciTarget* self = g_object_new(THIS_TYPE, NULL);
+
+    self->target.technology = technology;
+    return self;
+}
 
 static
 NciTargetPresenceCheck*
@@ -300,6 +310,21 @@ nci_target_transmit_finish_iso_dep(
     return TRUE;
 }
 
+static
+gboolean
+nci_target_transmit_finish_nfc_dep(
+    NfcTarget* target,
+    const guint8* payload,
+    guint len)
+{
+    /*
+     * 8.4 NFC-DEP RF Interface
+     * 8.4.1.2 Data from RF to the DH
+     */
+    nfc_target_transmit_done(target, NFC_TRANSMIT_STATUS_OK, payload, len);
+    return TRUE;
+}
+
 /*==========================================================================*
  * Interface
  *==========================================================================*/
@@ -309,83 +334,116 @@ nci_target_new(
     NciAdapter* adapter,
     const NciIntfActivationNtf* ntf)
 {
-     NciTarget* self = g_object_new(THIS_TYPE, NULL);
-     NfcTarget* target = &self->target;
-     int tx_timeout = -1;
+    NFC_TECHNOLOGY tech = NFC_TECHNOLOGY_UNKNOWN;
 
-     switch (ntf->mode) {
-     case NCI_MODE_PASSIVE_POLL_A:
-     case NCI_MODE_ACTIVE_POLL_A:
-     case NCI_MODE_PASSIVE_LISTEN_A:
-     case NCI_MODE_ACTIVE_LISTEN_A:
-         target->technology = NFC_TECHNOLOGY_A;
-         break;
-     case NCI_MODE_PASSIVE_POLL_B:
-     case NCI_MODE_PASSIVE_LISTEN_B:
-         target->technology = NFC_TECHNOLOGY_B;
-         break;
-     case NCI_MODE_PASSIVE_POLL_F:
-     case NCI_MODE_PASSIVE_LISTEN_F:
-     case NCI_MODE_ACTIVE_LISTEN_F:
-         target->technology = NFC_TECHNOLOGY_F;
-         break;
-     default:
-         break;
-     }
+    switch (ntf->mode) {
+    case NCI_MODE_PASSIVE_POLL_A:
+    case NCI_MODE_ACTIVE_POLL_A:
+        tech = NFC_TECHNOLOGY_A;
+        break;
+    case NCI_MODE_PASSIVE_POLL_B:
+        tech = NFC_TECHNOLOGY_B;
+        break;
+    case NCI_MODE_PASSIVE_POLL_F:
+    case NCI_MODE_ACTIVE_POLL_F:
+        tech = NFC_TECHNOLOGY_F;
+        break;
+    case NCI_MODE_PASSIVE_POLL_V:
+    case NCI_MODE_PASSIVE_LISTEN_V:
+    case NCI_MODE_PASSIVE_LISTEN_A:
+    case NCI_MODE_PASSIVE_LISTEN_B:
+    case NCI_MODE_PASSIVE_LISTEN_F:
+    case NCI_MODE_ACTIVE_LISTEN_A:
+    case NCI_MODE_ACTIVE_LISTEN_F:
+        break;
+    }
 
-     switch (ntf->protocol) {
-     case NCI_PROTOCOL_T1T:
-         target->protocol = NFC_PROTOCOL_T1_TAG;
-         break;
-     case NCI_PROTOCOL_T2T:
-         target->protocol = NFC_PROTOCOL_T2_TAG;
-         self->presence_check_fn = nci_target_presence_check_t2;
-         break;
-     case NCI_PROTOCOL_T3T:
-         target->protocol = NFC_PROTOCOL_T3_TAG;
-         break;
-     case NCI_PROTOCOL_ISO_DEP:
-         self->presence_check_fn = nci_target_presence_check_t4;
-         switch (target->technology) {
-         case NFC_TECHNOLOGY_A:
-             target->protocol = NFC_PROTOCOL_T4A_TAG;
-             break;
-         case NFC_TECHNOLOGY_B:
-             target->protocol = NFC_PROTOCOL_T4B_TAG;
-             break;
-         default:
-             GDEBUG("Unexpected ISO_DEP technology");
-             break;
-         }
-         break;
-     case NCI_PROTOCOL_NFC_DEP:
-         target->protocol = NFC_PROTOCOL_NFC_DEP;
-         break;
-     default:
-         GDEBUG("Unsupported protocol 0x%02x", ntf->protocol);
-         break;
-     }
+    if (tech != NFC_TECHNOLOGY_UNKNOWN) {
+        NFC_PROTOCOL protocol = NFC_PROTOCOL_UNKNOWN;
+        NciTargetPresenceCheckFunc presence_check = NULL;
 
-     switch (ntf->rf_intf) {
-     case NCI_RF_INTERFACE_FRAME:
-         self->transmit_finish_fn = nci_target_transmit_finish_frame;
-         break;
-     case NCI_RF_INTERFACE_ISO_DEP:
-         tx_timeout = 0; /* Rely on CORE_INTERFACE_ERROR_NTF */
-         self->transmit_finish_fn = nci_target_transmit_finish_iso_dep;
-         break;
-     default:
-         GDEBUG("Unsupported RF interface 0x%02x", ntf->rf_intf);
-         break;
-     }
+        switch (ntf->protocol) {
+        case NCI_PROTOCOL_T1T:
+            protocol = NFC_PROTOCOL_T1_TAG;
+            break;
+        case NCI_PROTOCOL_T2T:
+            protocol = NFC_PROTOCOL_T2_TAG;
+            presence_check = nci_target_presence_check_t2;
+            break;
+        case NCI_PROTOCOL_T3T:
+            protocol = NFC_PROTOCOL_T3_TAG;
+            break;
+        case NCI_PROTOCOL_ISO_DEP:
+            presence_check = nci_target_presence_check_t4;
+            switch (tech) {
+            case NFC_TECHNOLOGY_A:
+                protocol = NFC_PROTOCOL_T4A_TAG;
+                break;
+            case NFC_TECHNOLOGY_B:
+                protocol = NFC_PROTOCOL_T4B_TAG;
+                break;
+            default:
+                GDEBUG("Unexpected ISO_DEP technology");
+                break;
+            }
+            break;
+        case NCI_PROTOCOL_NFC_DEP:
+            protocol = NFC_PROTOCOL_NFC_DEP;
+            break;
+        default:
+            GDEBUG("Unsupported protocol 0x%02x", ntf->protocol);
+            break;
+        }
 
-     self->adapter = adapter;
-     nfc_target_set_transmit_timeout(target, tx_timeout);
-     g_object_add_weak_pointer(G_OBJECT(adapter), (gpointer*)&self->adapter);
-     self->event_id[EVENT_DATA_PACKET] =
-         nci_core_add_data_packet_handler(adapter->nci,
-             nci_target_data_packet_handler, self);
-     return target;
+        if (protocol != NFC_PROTOCOL_UNKNOWN) {
+            NciTargetTransmitFinishFunc transmit_finish = NULL;
+            int tx_timeout = -1;
+
+            switch (ntf->rf_intf) {
+            case NCI_RF_INTERFACE_FRAME:
+                switch (ntf->protocol) {
+                case NCI_PROTOCOL_NFC_DEP:
+                    GDEBUG("Frame interface not supported for NFC-DEP");
+                    break;
+                case NCI_PROTOCOL_ISO_DEP:
+                    GDEBUG("Frame interface not supported for ISO-DEP");
+                    break;
+                default:
+                    transmit_finish = nci_target_transmit_finish_frame;
+                    break;
+                }
+                break;
+            case NCI_RF_INTERFACE_ISO_DEP:
+                transmit_finish = nci_target_transmit_finish_iso_dep;
+                break;
+            case NCI_RF_INTERFACE_NFC_DEP:
+                tx_timeout = 0; /* Rely on CORE_INTERFACE_ERROR_NTF */
+                transmit_finish = nci_target_transmit_finish_nfc_dep;
+                break;
+            default:
+                GDEBUG("Unsupported RF interface 0x%02x", ntf->rf_intf);
+                break;
+            }
+
+            if (transmit_finish) {
+                NciTarget* self = nci_target_new_with_technology(tech);
+                NfcTarget* target = &self->target;
+
+                target->protocol = protocol;
+                self->adapter = adapter;
+                self->presence_check_fn = presence_check;
+                self->transmit_finish_fn = transmit_finish;
+                nfc_target_set_transmit_timeout(target, tx_timeout);
+                g_object_add_weak_pointer(G_OBJECT(adapter),
+                    (gpointer*) &self->adapter);
+                self->event_id[EVENT_DATA_PACKET] =
+                    nci_core_add_data_packet_handler(adapter->nci,
+                        nci_target_data_packet_handler, self);
+                return target;
+            }
+        }
+    }
+    return NULL;
 }
 
 guint
@@ -458,7 +516,7 @@ void
 nci_target_deactivate(
     NfcTarget* target)
 {
-    nci_adapter_deactivate(THIS(target)->adapter, target);
+    nci_adapter_deactivate_target(THIS(target)->adapter, target);
 }
 
 static

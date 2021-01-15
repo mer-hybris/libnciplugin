@@ -44,6 +44,7 @@ PCVERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_RELEASE)
 
 SRC = \
   nci_adapter.c \
+  nci_initiator.c \
   nci_target.c
 
 #
