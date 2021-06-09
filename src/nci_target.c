@@ -414,6 +414,7 @@ nci_target_new(
                 }
                 break;
             case NCI_RF_INTERFACE_ISO_DEP:
+                tx_timeout = 0; /* Rely on CORE_INTERFACE_ERROR_NTF */
                 transmit_finish = nci_target_transmit_finish_iso_dep;
                 break;
             case NCI_RF_INTERFACE_NFC_DEP:
