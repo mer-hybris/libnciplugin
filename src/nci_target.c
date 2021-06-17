@@ -253,10 +253,11 @@ nci_target_presence_check_t2(
     NciTarget* self,
     NciTargetPresenceCheck* check)
 {
+    NfcTarget* target = &self->target;
     static const guint8 cmd_data[] = { T2T_CMD_READ, 0x00 };
 
-    return nfc_target_transmit(&self->target, cmd_data, sizeof(cmd_data),
-        NULL, nci_target_presence_check_complete,
+    return nfc_target_transmit(target, cmd_data, sizeof(cmd_data),
+        target->sequence, nci_target_presence_check_complete,
         nci_target_presence_check_free1, check);
 }
 
@@ -266,8 +267,10 @@ nci_target_presence_check_t4(
     NciTarget* self,
     NciTargetPresenceCheck* check)
 {
-    return nfc_target_transmit(&self->target, NULL, 0,
-        NULL, nci_target_presence_check_complete,
+    NfcTarget* target = &self->target;
+
+    return nfc_target_transmit(target, NULL, 0,
+        target->sequence, nci_target_presence_check_complete,
         nci_target_presence_check_free1, check);
 }
 
