@@ -393,8 +393,7 @@ nci_adapter_mode_check(
     NciCore* nci = self->nci;
     NciAdapterPriv* priv = self->priv;
     const NFC_MODE mode = (nci->current_state > NCI_RFST_IDLE) ?
-        ((priv->current_mode == NFC_MODE_NONE) ? priv->desired_mode :
-        priv->current_mode) : NFC_MODE_NONE;
+        priv->desired_mode : NFC_MODE_NONE;
 
     if (priv->mode_check_id) {
         g_source_remove(priv->mode_check_id);
