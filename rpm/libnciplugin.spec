@@ -11,6 +11,7 @@ Source: %{name}-%{version}.tar.bz2
 %define libncicore_version 1.1.13
 %define libglibutil_version 1.0.31
 
+BuildRequires: pkgconfig
 BuildRequires: pkgconfig(glib-2.0)
 BuildRequires: pkgconfig(libglibutil) >= %{libglibutil_version}
 BuildRequires: pkgconfig(libncicore) >= %{libncicore_version}
@@ -28,7 +29,6 @@ Provides basic functionality for NCI-based nfcd plugins.
 %package devel
 Summary: Development library for %{name}
 Requires: %{name} = %{version}
-Requires: pkgconfig
 
 %description devel
 This package contains the development library for %{name}.
@@ -37,7 +37,7 @@ This package contains the development library for %{name}.
 %setup -q
 
 %build
-make LIBDIR=%{_libdir} KEEP_SYMBOLS=1 release pkgconfig
+make %{_smp_mflags} LIBDIR=%{_libdir} KEEP_SYMBOLS=1 release pkgconfig
 
 %install
 rm -rf %{buildroot}
