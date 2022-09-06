@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2019-2021 Jolla Ltd.
- * Copyright (C) 2019-2021 Slava Monich <slava.monich@jolla.com>
+ * Copyright (C) 2019-2022 Jolla Ltd.
+ * Copyright (C) 2019-2022 Slava Monich <slava.monich@jolla.com>
  *
  * You may use this file under the terms of the BSD license as follows:
  *
@@ -287,8 +287,30 @@ nci_target_transmit_finish_frame(
         /*
          * 8.2 Frame RF Interface
          * 8.2.1.2 Data from RF to the DH
+         *
+         * For NFC-A and NFC-B the Data Message SHALL correspond to the
+         * Payload of the Data and Payload Format defined in [DIGITAL]
+         * Section 4.4 for NFC-A and 5.4 for NFC-B followed by a Status
+         * field of 1 octet.
+         * ...
+         * If the RF frame was received correctly, the NFCC SHALL set the
+         * Status field of Data Message to a value of STATUS_OK. If the
+         * NFCC detected an error when receiving the RF frame, the NFCC
+         * SHALL set the Status field of the Data Message to a value of
+         * STATUS_RF_FRAME_CORRUPTED.
          */
-        if (status == NCI_STATUS_OK) {
+        if (status != NCI_STATUS_RF_FRAME_CORRUPTED) {
+            /*
+             * Since the spec (see above) defines only two valid status
+             * values, STATUS_OK and STATUS_RF_FRAME_CORRUPTED, let's
+             * treat anything other than STATUS_RF_FRAME_CORRUPTED as
+             * a success. In reality we're getting other (undocumented)
+             * status values on some devices, e.g. 0x14 which doesn't
+             * seem to be harmful.
+             */
+            if (status != NCI_STATUS_OK) {
+                GDEBUG("Hmm... transmission status 0x%02x", status);
+            }
             nfc_target_transmit_done(target, NFC_TRANSMIT_STATUS_OK,
                 payload, len - 1);
             return TRUE;
