@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2019-2022 Jolla Ltd.
- * Copyright (C) 2019-2022 Slava Monich <slava.monich@jolla.com>
+ * Copyright (C) 2023 Slava Monich <slava@monich.com>
  *
  * You may use this file under the terms of the BSD license as follows:
  *
@@ -44,6 +44,16 @@
 #include <nfc_target_impl.h>
 
 #define T2T_CMD_READ (0x30)
+
+/*
+ * With some ISO-DEP cards, CORE_INTERFACE_ERROR_NTF with RF_TIMEOUT_ERROR
+ * may take up to 15 seconds to arrive (that was actually observed with an
+ * MRTD equipped with a Type 4B NFC tag). That's way too long. On the other
+ * hand, the default timeout 500 ms appears to be too short for slow ISO-DEP
+ * cards (also reported to happen in real life). Let's use longer but yet
+ * reasonable timeout when ISO-DEP interface is activated.
+ */
+#define ISO_DEP_TRANSMIT_TIMEOUT_MS (2500)
 
 enum {
     EVENT_DATA_PACKET,
@@ -439,7 +449,7 @@ nci_target_new(
                 }
                 break;
             case NCI_RF_INTERFACE_ISO_DEP:
-                tx_timeout = 0; /* Rely on CORE_INTERFACE_ERROR_NTF */
+                tx_timeout = ISO_DEP_TRANSMIT_TIMEOUT_MS;
                 transmit_finish = nci_target_transmit_finish_iso_dep;
                 break;
             case NCI_RF_INTERFACE_NFC_DEP:
