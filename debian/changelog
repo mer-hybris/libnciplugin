@@ -1,3 +1,9 @@
+libnciplugin (1.1.5) unstable; urgency=low
+
+  * Use longer timeout for ISO-DEP targets
+
+ -- Slava Monich <slava@monich.com>  Sat, 18 Feb 2023 02:49:44 +0200
+
 libnciplugin (1.1.4) unstable; urgency=low
 
   * Relaxed Frame transmission success criteria

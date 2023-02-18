@@ -1,6 +1,6 @@
 Name: libnciplugin
 
-Version: 1.1.4
+Version: 1.1.5
 Release: 0
 Summary: Support library for NCI-based nfcd plugins
 License: BSD
