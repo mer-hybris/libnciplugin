@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2023 Slava Monich <slava@monich.com>
+ * Copyright (C) 2019-2024 Slava Monich <slava@monich.com>
  * Copyright (C) 2019-2021 Jolla Ltd.
  * Copyright (C) 2020 Open Mobile Platform LLC.
  *
@@ -9,21 +9,23 @@
  * modification, are permitted provided that the following conditions
  * are met:
  *
- *   1. Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *   2. Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *   3. Neither the names of the copyright holders nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ *  1. Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *
+ *  2. Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer
+ *     in the documentation and/or other materials provided with the
+ *     distribution.
+ *
+ *  3. Neither the names of the copyright holders nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
  * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
  * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
  * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
  * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
  * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
@@ -72,6 +74,65 @@ typedef struct nci_adapter_intf_info {
     NciModeParam* mode_param_parsed;
 } NciAdapterIntfInfo;
 
+/*==========================================================================*
+ * NCI adapter state machine
+ *
+ *              Poll side                         Listen side
+ *              ---------                         -----------
+ *
+ *                              +------+
+ *        /---------+---------> | IDLE | <------------------------------\
+ *        |         |           +------+                     card       |
+ *        |         |            |    ^                    emulation ---|--v
+ *        |         |            |    |                    (ISO-DEP)    |  |
+ *        |         |            |    |     Does the          /         |  |
+ *        |         |            | Unknown  interface ---- yes          |  |
+ *        |   Deactivation       |  object  info match?       \         |  |
+ *        |         |            v    |    /       |        Anything    |  |
+ *        |         |      Activation |   no    Activation    else      |  |
+ *        |         |        ^    \   /  /         ^           |        |  |
+ *        |         |       /      \ /  /          |           v        |  |
+ *        |  +-------------+      Object        +----------------+      |  |
+ *        |  | HAVE_TARGET | <-- detection ---> | HAVE_INITIATOR |      |  |
+ *        |  +-------------+        ^           +----------------+      |  |
+ *        |         |     ^         |                   |               |  |
+ *        |         |      \        |                   v               |  |
+ *        |         |       \       |              Deactivation         |  |
+ *        |  nfcd-initiated  |      |                /      \           |  |
+ *        |   reactivation   |      |               /        \          |  |
+ *        |         |        |      |             Card       Anything --+  |
+ *        |         |        |      |           emulation      else    /   |
+ *  nfcd-initiated  |        |      |           (ISO-DEP)             /    |
+ *   deactivation   |        |      |               |          Timeout     |
+ *        ^         |        |      |               |             ^        |
+ *        |         v        |      |               v             |        |
+ *  +---------------------+  |      |            +-----------------+       |
+ *  | REACTIVATING_TARGET |  |      |            | REACTIVATING_CE |       |
+ *  +---------------------+  ^      |            +-----------------+       |
+ *             |            /       |              |              ^        |
+ *             v           /        ^              v              |        |
+ *        Activation      /        / \        Activation          |        |
+ *             |         /        /   no        /                 |        |
+ *             |       yes       /      \      /             Deactivation  |
+ *           Does the  /        /       Does the                  |        |
+ *           interface ------- no       interface --- Activation  |        |
+ *           info match?                info match?       ^       |        |
+ *                                             |          |       |        |
+ *                                             |     +----------------+    |
+ *                                            yes--->| REACTIVATED_CE |<---/
+ *                                                   +----------------+
+ *
+ *==========================================================================*/
+
+typedef enum nci_adapter_state {
+    NCI_ADAPTER_IDLE,
+    NCI_ADAPTER_HAVE_TARGET,
+    NCI_ADAPTER_HAVE_INITIATOR,
+    NCI_ADAPTER_REACTIVATING_TARGET,
+    NCI_ADAPTER_REACTIVATING_CE,
+    NCI_ADAPTER_REACTIVATED_CE
+} NCI_ADAPTER_STATE;
+
 struct nci_adapter_priv {
     gulong nci_event_id[CORE_EVENT_COUNT];
     NFC_MODE desired_mode;
@@ -81,8 +142,15 @@ struct nci_adapter_priv {
     guint presence_check_id;
     guint presence_check_timer;
     NciAdapterIntfInfo* active_intf;
-    gboolean reactivating;
-    NfcInitiator *initiator;
+    NfcInitiator* initiator;
+    NCI_ADAPTER_STATE internal_state;
+    guint ce_reactivation_timer;
+    NCI_TECH supported_techs;
+    NCI_TECH active_techs;
+    NCI_TECH active_tech_mask;
+    NfcTag* tag;     /* Weak pointer */
+    NfcHost* host;   /* Weak pointer */
+    NfcPeer* peer;   /* Weak pointer */
 };
 
 #define PARENT_CLASS nci_adapter_parent_class
@@ -94,6 +162,7 @@ struct nci_adapter_priv {
 G_DEFINE_ABSTRACT_TYPE(NciAdapter, nci_adapter, NFC_TYPE_ADAPTER)
 
 #define PRESENCE_CHECK_PERIOD_MS (250)
+#define CE_REACTIVATION_TIMEOUT_MS (1500)
 
 #define RANDOM_UID_SIZE (4)
 #define RANDOM_UID_START_BYTE (0x08)
@@ -101,6 +170,40 @@ G_DEFINE_ABSTRACT_TYPE(NciAdapter, nci_adapter, NFC_TYPE_ADAPTER)
 /*==========================================================================*
  * Implementation
  *==========================================================================*/
+
+#if GUTIL_LOG_DEBUG
+static
+const char*
+nci_adapter_internal_state_name(
+    NCI_ADAPTER_STATE state)
+{
+    switch (state) {
+    #define NCI_ADAPTER_(x) case NCI_ADAPTER_##x: return #x
+    NCI_ADAPTER_(IDLE);
+    NCI_ADAPTER_(HAVE_TARGET);
+    NCI_ADAPTER_(HAVE_INITIATOR);
+    NCI_ADAPTER_(REACTIVATING_TARGET);
+    NCI_ADAPTER_(REACTIVATING_CE);
+    NCI_ADAPTER_(REACTIVATED_CE);
+    #undef NCI_ADAPTER_
+    }
+    return "?";
+}
+#endif
+
+static
+void
+nci_adapter_set_internal_state(
+    NciAdapterPriv* priv,
+    NCI_ADAPTER_STATE state)
+{
+    if (priv->internal_state != state) {
+        GDEBUG("Internal state %s => %s",
+            nci_adapter_internal_state_name(priv->internal_state),
+            nci_adapter_internal_state_name(state));
+        priv->internal_state = state;
+    }
+}
 
 static
 NciAdapterIntfInfo*
@@ -145,18 +248,42 @@ nci_adapter_intf_info_new(
 }
 
 static
+void
+nci_adapter_intf_info_free(
+    NciAdapterIntfInfo* info)
+{
+    if (info) {
+        g_free(info->mode_param_parsed);
+        g_free(info);
+    }
+}
+
+static
 gboolean
 mode_param_match_poll_a(
     const NciModeParamPollA* pa1,
     const NciModeParamPollA* pa2)
 {
-    /*
-    * Compare all fields except UID 'cause UID may be
-    * changed after losing field
-    */
-    return pa1->sel_res == pa2->sel_res &&
+    if (pa1->sel_res == pa2->sel_res &&
         pa1->sel_res_len == pa2->sel_res_len &&
-        !memcmp(pa1->sens_res, pa2->sens_res, sizeof(pa2->sens_res));
+        pa1->nfcid1_len == pa2->nfcid1_len &&
+        !memcmp(pa1->sens_res, pa2->sens_res, sizeof(pa2->sens_res))) {
+
+        /*
+         * As specified in NFCForum-TS-DigitalProtocol-1.0, in case of
+         * a single size NFCID1 (4 Bytes), a value of nfcid10 set to 08h
+         * indicates that nfcid11 to nfcid13 SHALL be dynamically generated.
+         */
+        if (pa1->nfcid1_len == RANDOM_UID_SIZE &&
+            pa1->nfcid1[0] == pa2->nfcid1[0] &&
+            pa2->nfcid1[0] == RANDOM_UID_START_BYTE) {
+            return TRUE;
+        } else {
+            /* Otherwise UID should fully match */
+            return !memcmp(pa1->nfcid1, pa2->nfcid1, pa2->nfcid1_len);
+        }
+    }
+    return FALSE;
 }
 
 static
@@ -177,32 +304,6 @@ mode_param_match_poll_b(
 
 static
 gboolean
-mode_param_match_poll_a_t2(
-    const NciModeParamPollA* pa1,
-    const NciModeParamPollA* pa2)
-{
-    gboolean partial_match = mode_param_match_poll_a(pa1, pa2);
-
-    /*
-    * For tag type 2 logic is almost the same, but random UID has some
-    * limitations: according to AN10927 Random UID RID should be handled
-    * separately - single sized (4 bytes) starting with 0x08
-    */
-    if (pa1->nfcid1_len == pa2->nfcid1_len &&
-        pa2->nfcid1_len == RANDOM_UID_SIZE &&
-        pa1->nfcid1[0] == pa2->nfcid1[0] &&
-        pa2->nfcid1[0] == RANDOM_UID_START_BYTE) {
-        return partial_match;
-    } else {
-        /* Otherwise UID should fully match */
-        return partial_match &&
-            pa1->nfcid1_len == pa2->nfcid1_len &&
-            !memcmp(pa1->nfcid1, pa2->nfcid1, pa2->nfcid1_len);
-    }
-}
-
-static
-gboolean
 nci_adapter_info_mode_params_matches(
     const NciAdapterIntfInfo* info,
     const NciIntfActivationNtf* ntf)
@@ -215,11 +316,8 @@ nci_adapter_info_mode_params_matches(
         switch (ntf->mode) {
         case NCI_MODE_PASSIVE_POLL_A:
             switch (ntf->rf_intf) {
-            case NCI_RF_INTERFACE_FRAME:
-                /* Type 2 Tag */
-                return mode_param_match_poll_a_t2(&mp1->poll_a, &mp2->poll_a);
-            case NCI_RF_INTERFACE_ISO_DEP:
-                /* ISO-DEP Type 4A */
+            case NCI_RF_INTERFACE_FRAME:    /* Type 2 Tag */
+            case NCI_RF_INTERFACE_ISO_DEP:  /* ISO-DEP Type 4A */
                 return mode_param_match_poll_a(&mp1->poll_a, &mp2->poll_a);
             case NCI_RF_INTERFACE_NFCEE_DIRECT:
             case NCI_RF_INTERFACE_NFC_DEP:
@@ -275,6 +373,62 @@ nci_adapter_intf_info_matches(
 }
 
 static
+gpointer
+nci_adapter_set_active_object(
+    gpointer obj,
+    gpointer* weak_ptr)
+{
+    if (*weak_ptr != obj) {
+        if (*weak_ptr) {
+            g_object_remove_weak_pointer(*weak_ptr, weak_ptr);
+        }
+        *weak_ptr = obj;
+        if (obj) {
+            g_object_add_weak_pointer(obj, weak_ptr);
+        }
+    }
+    return obj;
+}
+
+static
+NfcTag*
+nci_adapter_set_active_tag(
+    NciAdapterPriv* priv,
+    NfcTag* tag)
+{
+    return nci_adapter_set_active_object(tag, (gpointer*) &priv->tag);
+}
+
+static
+NfcPeer*
+nci_adapter_set_active_peer(
+    NciAdapterPriv* priv,
+    NfcPeer* peer)
+{
+    return nci_adapter_set_active_object(peer, (gpointer*) &priv->peer);
+}
+
+static
+NfcHost*
+nci_adapter_set_active_host(
+    NciAdapterPriv* priv,
+    NfcHost* host)
+{
+    return nci_adapter_set_active_object(host, (gpointer*) &priv->host);
+}
+
+static
+void
+nci_adapter_clear_active_intf(
+    NciAdapterPriv* priv)
+{
+    if (priv->active_intf) {
+        nci_adapter_intf_info_free(priv->active_intf);
+        priv->active_intf = NULL;
+    }
+}
+
+static
 void
 nci_adapter_drop_target(
     NciAdapter* self)
@@ -285,19 +439,13 @@ nci_adapter_drop_target(
         NciAdapterPriv* priv = self->priv;
 
         self->target = NULL;
-        priv->reactivating = FALSE;
-        if (priv->presence_check_timer) {
-            g_source_remove(priv->presence_check_timer);
-            priv->presence_check_timer = 0;
-        }
+        nci_adapter_clear_active_intf(priv);
+        gutil_source_clear(&priv->presence_check_timer);
+        nci_adapter_set_active_peer(priv, NULL);
+        nci_adapter_set_active_tag(priv, NULL);
         if (priv->presence_check_id) {
             nfc_target_cancel_transmit(target, priv->presence_check_id);
             priv->presence_check_id = 0;
-        }
-        if (priv->active_intf) {
-            g_free(priv->active_intf->mode_param_parsed);
-            g_free(priv->active_intf);
-            priv->active_intf = NULL;
         }
         GINFO("Target is gone");
         nfc_target_gone(target);
@@ -308,12 +456,19 @@ nci_adapter_drop_target(
 static
 void
 nci_adapter_drop_initiator(
-    NciAdapterPriv* priv)
+    NciAdapter* self)
 {
+    NciAdapterPriv* priv = self->priv;
     NfcInitiator* initiator = priv->initiator;
 
     if (initiator) {
         priv->initiator = NULL;
+        priv->active_tech_mask = NCI_TECH_ALL;
+        nci_adapter_clear_active_intf(priv);
+        gutil_source_clear(&priv->ce_reactivation_timer);
+        nci_adapter_set_active_peer(priv, NULL);
+        nci_adapter_set_active_host(priv, NULL);
+        nci_core_set_tech(self->nci, priv->active_techs);
         GINFO("Initiator is gone");
         nfc_initiator_gone(initiator);
         nfc_initiator_unref(initiator);
@@ -326,7 +481,7 @@ nci_adapter_drop_all(
     NciAdapter* self)
 {
     nci_adapter_drop_target(self);
-    nci_adapter_drop_initiator(self->priv);
+    nci_adapter_drop_initiator(self);
 }
 
 static
@@ -337,7 +492,7 @@ nci_adapter_need_presence_checks(
     const NciAdapterIntfInfo* intf = self->priv->active_intf;
 
     /* NFC-DEP presence checks are done at LLCP level by NFC core */
-    return (intf && intf->protocol != NCI_PROTOCOL_NFC_DEP);
+    return (self->target && intf && intf->protocol != NCI_PROTOCOL_NFC_DEP);
 }
 
 static
@@ -393,10 +548,7 @@ nci_adapter_mode_check(
     const NFC_MODE mode = (nci->current_state > NCI_RFST_IDLE) ?
         priv->desired_mode : NFC_MODE_NONE;
 
-    if (priv->mode_check_id) {
-        g_source_remove(priv->mode_check_id);
-        priv->mode_check_id = 0;
-    }
+    gutil_source_clear(&priv->mode_check_id);
     if (priv->mode_change_pending) {
         if (mode == priv->desired_mode) {
             priv->mode_change_pending = FALSE;
@@ -409,6 +561,7 @@ nci_adapter_mode_check(
     }
 }
 
+static
 gboolean
 nci_adapter_mode_check_cb(
     gpointer user_data)
@@ -444,10 +597,11 @@ nci_adapter_state_check(
         nci->next_state == NCI_RFST_IDLE) {
         NfcAdapter* adapter = &self->parent;
 
-        if (adapter->powered && adapter->enabled) {
+        if (adapter->enabled && adapter->powered && adapter->power_requested) {
             /*
              * State machine may have switched to RFST_IDLE in the process of
-             * changing the operation mode. Kick it back to RFST_DISCOVERY.
+             * changing the operation mode or active technologies. Kick it
+             * back to RFST_DISCOVERY.
              */
             nci_core_set_state(self->nci, NCI_RFST_DISCOVERY);
         }
@@ -541,27 +695,39 @@ static
 const NfcParamIsoDepPollA*
 nci_adapter_convert_iso_dep_poll_a(
     NfcParamIsoDepPollA* dest,
-    const NciActivationParamIsoDepPollA* src)
+    const NciActivationParam* ap)
 {
-    dest->fsc = src->fsc;
-    dest->t1 = src->t1;
-    dest->t0 = src->t0;
-    dest->ta = src->ta;
-    dest->tb = src->tb;
-    dest->tc = src->tc;
-    return dest;
+    if (ap) {
+        const NciActivationParamIsoDepPollA* src = &ap->iso_dep_poll_a;
+
+        dest->fsc = src->fsc;
+        dest->t1 = src->t1;
+        dest->t0 = src->t0;
+        dest->ta = src->ta;
+        dest->tb = src->tb;
+        dest->tc = src->tc;
+        return dest;
+    } else {
+        return NULL;
+    }
 }
 
 static
 const NfcParamIsoDepPollB*
 nci_adapter_convert_iso_dep_poll_b(
     NfcParamIsoDepPollB* dest,
-    const NciActivationParamIsoDepPollB* src)
+    const NciActivationParam* ap)
 {
-    dest->mbli = src->mbli;     /* Maximum buffer length index */
-    dest->did = src->did;       /* Device ID */
-    dest->hlr = src->hlr;       /* Higher Layer Response */
-    return dest;
+    if (ap) {
+        const NciActivationParamIsoDepPollB* src = &ap->iso_dep_poll_b;
+
+        dest->mbli = src->mbli;
+        dest->did = src->did;
+        dest->hlr = src->hlr;
+        return dest;
+    } else {
+        return NULL;
+    }
 }
 
 static
@@ -570,10 +736,14 @@ nci_adapter_convert_nfc_dep_poll(
     NfcParamNfcDepInitiator* dest,
     const NciActivationParam* ap)
 {
-    const NciActivationParamNfcDepPoll* src = &ap->nfc_dep_poll;
+    if (ap) {
+        const NciActivationParamNfcDepPoll* src = &ap->nfc_dep_poll;
 
-    dest->atr_res_g = src->g;
-    return dest;
+        dest->atr_res_g = src->g;
+        return dest;
+    } else {
+        return NULL;
+    }
 }
 
 static
@@ -582,22 +752,30 @@ nci_adapter_convert_nfc_dep_listen(
     NfcParamNfcDepTarget* dest,
     const NciActivationParam* ap)
 {
-    const NciActivationParamNfcDepListen* src = &ap->nfc_dep_listen;
+    if (ap) {
+        const NciActivationParamNfcDepListen* src = &ap->nfc_dep_listen;
 
-    dest->atr_req_g = src->g;
-    return dest;
+        dest->atr_req_g = src->g;
+        return dest;
+    } else {
+        return NULL;
+    }
 }
 
 static
 NfcTag*
 nci_adapter_create_known_tag(
-    NfcAdapter* adapter,
+    NciAdapter* self,
     NfcTarget* target,
     const NciIntfActivationNtf* ntf)
 {
+    const NciActivationParam* ap = ntf->activation_param;
     const NciModeParam* mp = ntf->mode_param;
+    NfcParamIsoDepPollA iso_dep_poll_a;
+    NfcParamIsoDepPollB iso_dep_poll_b;
     NfcParamPollA poll_a;
     NfcParamPollB poll_b;
+    NfcTag* tag = NULL;
 
     /* Figure out what kind of target we are dealing with */
     switch (ntf->protocol) {
@@ -607,8 +785,9 @@ nci_adapter_create_known_tag(
             case NCI_MODE_PASSIVE_POLL_A:
             case NCI_MODE_ACTIVE_POLL_A:
                 /* Type 2 Tag */
-                return nfc_adapter_add_tag_t2(adapter, target,
+                tag = nfc_adapter_add_tag_t2(NFC_ADAPTER(self), target,
                     nci_adapter_convert_poll_a(&poll_a, mp));
+                break;
             case NCI_MODE_PASSIVE_POLL_B:
             case NCI_MODE_PASSIVE_POLL_F:
             case NCI_MODE_ACTIVE_POLL_F:
@@ -628,27 +807,15 @@ nci_adapter_create_known_tag(
             switch (ntf->mode) {
             case NCI_MODE_PASSIVE_POLL_A:
                 /* ISO-DEP Type 4A */
-                if (ntf->activation_param) {
-                    const NciActivationParam* ap = ntf->activation_param;
-                    NfcParamIsoDepPollA iso_dep_poll_a;
-
-                    return nfc_adapter_add_tag_t4a(adapter, target,
-                        nci_adapter_convert_poll_a(&poll_a, mp),
-                        nci_adapter_convert_iso_dep_poll_a(&iso_dep_poll_a,
-                            &ap->iso_dep_poll_a));
-                }
+                tag = nfc_adapter_add_tag_t4a(NFC_ADAPTER(self), target,
+                    nci_adapter_convert_poll_a(&poll_a, mp),
+                    nci_adapter_convert_iso_dep_poll_a(&iso_dep_poll_a, ap));
                 break;
             case NCI_MODE_PASSIVE_POLL_B:
                 /* ISO-DEP Type 4B */
-                if (ntf->activation_param) {
-                    const NciActivationParam* ap = ntf->activation_param;
-                    NfcParamIsoDepPollB iso_dep_poll_b;
-
-                    return nfc_adapter_add_tag_t4b(adapter, target,
-                        nci_adapter_convert_poll_b(&poll_b, mp),
-                        nci_adapter_convert_iso_dep_poll_b(&iso_dep_poll_b,
-                            &ap->iso_dep_poll_b));
-                }
+                tag = nfc_adapter_add_tag_t4b(NFC_ADAPTER(self), target,
+                    nci_adapter_convert_poll_b(&poll_b, mp),
+                    nci_adapter_convert_iso_dep_poll_b(&iso_dep_poll_b, ap));
                 break;
             case NCI_MODE_ACTIVE_POLL_A:
             case NCI_MODE_PASSIVE_POLL_F:
@@ -666,24 +833,28 @@ nci_adapter_create_known_tag(
         break;
     case NCI_PROTOCOL_T1T:
     case NCI_PROTOCOL_T3T:
+    case NCI_PROTOCOL_T5T:
     case NCI_PROTOCOL_NFC_DEP:
     case NCI_PROTOCOL_PROPRIETARY:
     case NCI_PROTOCOL_UNDETERMINED:
         break;
     }
-    return NULL;
+    return nci_adapter_set_active_tag(self->priv, tag);
 }
 
 static
 NfcPeer*
 nci_adapter_create_peer_initiator(
-    NfcAdapter* adapter,
+    NciAdapter* self,
     NfcTarget* target,
     const NciIntfActivationNtf* ntf)
 {
-    const NciModeParam* mp = ntf->mode_param;
     const NciActivationParam* ap = ntf->activation_param;
+    const NciModeParam* mp = ntf->mode_param;
     NfcParamNfcDepInitiator nfc_dep;
+    NfcParamPollA poll_a;
+    NfcParamPollF poll_f;
+    NfcPeer* peer = NULL;
 
     switch (ntf->protocol) {
     case NCI_PROTOCOL_NFC_DEP:
@@ -692,24 +863,16 @@ nci_adapter_create_peer_initiator(
             case NCI_MODE_ACTIVE_POLL_A:
             case NCI_MODE_PASSIVE_POLL_A:
                 /* NFC-DEP (Poll side) */
-                if (ntf->activation_param) {
-                    NfcParamPollA poll_a;
-
-                    return nfc_adapter_add_peer_initiator_a(adapter, target,
-                        nci_adapter_convert_poll_a(&poll_a, mp),
-                        nci_adapter_convert_nfc_dep_poll(&nfc_dep, ap));
-                }
+                peer = nfc_adapter_add_peer_initiator_a(NFC_ADAPTER(self),
+                    target, nci_adapter_convert_poll_a(&poll_a, mp),
+                    nci_adapter_convert_nfc_dep_poll(&nfc_dep, ap));
                 break;
             case NCI_MODE_ACTIVE_POLL_F:
             case NCI_MODE_PASSIVE_POLL_F:
                 /* NFC-DEP (Poll side) */
-                if (ntf->activation_param) {
-                    NfcParamPollF poll_f;
-
-                    return nfc_adapter_add_peer_initiator_f(adapter, target,
-                        nci_adapter_convert_poll_f(&poll_f, mp),
-                        nci_adapter_convert_nfc_dep_poll(&nfc_dep, ap));
-                }
+                peer = nfc_adapter_add_peer_initiator_f(NFC_ADAPTER(self),
+                    target, nci_adapter_convert_poll_f(&poll_f, mp),
+                    nci_adapter_convert_nfc_dep_poll(&nfc_dep, ap));
                 break;
             case NCI_MODE_ACTIVE_LISTEN_A:
             case NCI_MODE_PASSIVE_LISTEN_A:
@@ -726,25 +889,27 @@ nci_adapter_create_peer_initiator(
     case NCI_PROTOCOL_T1T:
     case NCI_PROTOCOL_T2T:
     case NCI_PROTOCOL_T3T:
+    case NCI_PROTOCOL_T5T:
     case NCI_PROTOCOL_ISO_DEP:
     case NCI_PROTOCOL_PROPRIETARY:
     case NCI_PROTOCOL_UNDETERMINED:
         break;
     }
-    return NULL;
-    return NULL;
+    return nci_adapter_set_active_peer(self->priv, peer);
 }
 
 static
 NfcPeer*
 nci_adapter_create_peer_target(
-    NfcAdapter* adapter,
+    NciAdapter* self,
     NfcInitiator* initiator,
     const NciIntfActivationNtf* ntf)
 {
-    const NciModeParam* mp = ntf->mode_param;
     const NciActivationParam* ap = ntf->activation_param;
+    const NciModeParam* mp = ntf->mode_param;
     NfcParamNfcDepTarget nfc_dep;
+    NfcParamListenF listen_f;
+    NfcPeer* peer = NULL;
 
     switch (ntf->rf_intf) {
     case NCI_RF_INTERFACE_NFC_DEP:
@@ -752,21 +917,15 @@ nci_adapter_create_peer_target(
         case NCI_MODE_ACTIVE_LISTEN_A:
         case NCI_MODE_PASSIVE_LISTEN_A:
             /* NFC-DEP (Listen side) */
-            if (ntf->activation_param) {
-                return nfc_adapter_add_peer_target_a(adapter, initiator, NULL,
-                    nci_adapter_convert_nfc_dep_listen(&nfc_dep, ap));
-            }
+            peer = nfc_adapter_add_peer_target_a(NFC_ADAPTER(self), initiator,
+                NULL, nci_adapter_convert_nfc_dep_listen(&nfc_dep, ap));
             break;
         case NCI_MODE_PASSIVE_LISTEN_F:
         case NCI_MODE_ACTIVE_LISTEN_F:
             /* NFC-DEP (Listen side) */
-            if (ntf->activation_param) {
-                NfcParamListenF listen_f;
-
-                return nfc_adapter_add_peer_target_f(adapter, initiator,
-                    nci_adapter_convert_listen_f(&listen_f, mp),
-                    nci_adapter_convert_nfc_dep_listen(&nfc_dep, ap));
-            }
+            peer = nfc_adapter_add_peer_target_f(NFC_ADAPTER(self), initiator,
+                nci_adapter_convert_listen_f(&listen_f, mp),
+                nci_adapter_convert_nfc_dep_listen(&nfc_dep, ap));
             break;
         case NCI_MODE_ACTIVE_POLL_A:
         case NCI_MODE_PASSIVE_POLL_A:
@@ -785,7 +944,29 @@ nci_adapter_create_peer_target(
     case NCI_RF_INTERFACE_PROPRIETARY:
         break;
     }
-    return NULL;
+    return nci_adapter_set_active_peer(self->priv, peer);
+}
+
+static
+NfcHost*
+nci_adapter_create_host(
+    NciAdapter* self,
+    NfcInitiator* initiator,
+    const NciIntfActivationNtf* ntf)
+{
+    NfcHost* host = NULL;
+
+    switch (ntf->rf_intf) {
+    case NCI_RF_INTERFACE_ISO_DEP:
+        host = nfc_adapter_add_host(NFC_ADAPTER(self), initiator);
+        break;
+    case NCI_RF_INTERFACE_FRAME:
+    case NCI_RF_INTERFACE_NFC_DEP:
+    case NCI_RF_INTERFACE_NFCEE_DIRECT:
+    case NCI_RF_INTERFACE_PROPRIETARY:
+        break;
+    }
+    return nci_adapter_set_active_host(self->priv, host);
 }
 
 static
@@ -823,6 +1004,232 @@ nci_adapter_get_mode_param(
     return NULL;
 }
 
+/*==========================================================================*
+ * NCI adapter state machine events
+ *==========================================================================*/
+
+static
+gboolean
+nci_adapter_ce_reactivation_timeout(
+    gpointer user_data)
+{
+    NciAdapter* self = THIS(user_data);
+    NciAdapterPriv* priv = self->priv;
+
+    GDEBUG("CE reactivation timeout has expired");
+    priv->ce_reactivation_timer = 0;
+    nci_adapter_set_internal_state(priv, NCI_ADAPTER_IDLE);
+    nci_adapter_drop_all(self);
+    return G_SOURCE_REMOVE;
+}
+
+static
+void
+nci_adapter_start_ce_reactivation_timer(
+    NciAdapter* self)
+{
+    NciAdapterPriv* priv = self->priv;
+
+    GDEBUG("%s CE reactivation timer", priv->ce_reactivation_timer ?
+        "Restarting" : "Starting");
+    gutil_source_remove(priv->ce_reactivation_timer);
+    priv->ce_reactivation_timer = g_timeout_add(CE_REACTIVATION_TIMEOUT_MS,
+        nci_adapter_ce_reactivation_timeout, self);
+}
+
+static
+void
+nci_adapter_activation(
+    NciAdapter* self,
+    const NciIntfActivationNtf* ntf)
+{
+    NfcAdapter* adapter = NFC_ADAPTER(self);
+    NciAdapterPriv* priv = self->priv;
+    NciCore* nci = self->nci;
+
+    /* Any activation stops CE reactivation timer if it's running */
+    gutil_source_clear(&priv->ce_reactivation_timer);
+
+    /* Update the adapter state */
+    switch (priv->internal_state) {
+    case NCI_ADAPTER_IDLE:
+        /* Continue to object detection */
+        break;
+    case NCI_ADAPTER_HAVE_TARGET:
+        nci_adapter_set_internal_state(priv, NCI_ADAPTER_IDLE);
+        nci_adapter_drop_target(self);
+        /* Continue to object detection */
+        break;
+    case NCI_ADAPTER_HAVE_INITIATOR:
+        if (nci_adapter_intf_info_matches(priv->active_intf, ntf)) {
+            if (priv->host) {
+                GDEBUG("CE host spontaneously reactivated");
+                nci_adapter_set_internal_state(priv,
+                    NCI_ADAPTER_REACTIVATED_CE);
+                nfc_initiator_reactivated(priv->initiator);
+            } else {
+                GDEBUG("Keeping initiator alive");
+            }
+        } else {
+            GDEBUG("Different initiator has arrived, dropping the old one");
+            nci_adapter_set_internal_state(priv, NCI_ADAPTER_IDLE);
+            nci_adapter_drop_initiator(self);
+            /* Continue to object detection */
+        }
+        break;
+    case NCI_ADAPTER_REACTIVATING_CE:
+    case NCI_ADAPTER_REACTIVATED_CE:
+        if (nci_adapter_intf_info_matches(priv->active_intf, ntf)) {
+            if (priv->internal_state == NCI_ADAPTER_REACTIVATED_CE) {
+                GDEBUG("Keeping CE initiator alive");
+            } else {
+                GDEBUG("CE initiator reactivated");
+                nci_adapter_set_internal_state(priv,
+                    NCI_ADAPTER_REACTIVATED_CE);
+            }
+            nfc_initiator_reactivated(priv->initiator);
+        } else {
+            GDEBUG("Different initiator has arrived, dropping the old one");
+            nci_adapter_set_internal_state(priv, NCI_ADAPTER_IDLE);
+            nci_adapter_drop_initiator(self);
+            /* Continue to object detection */
+        }
+        break;
+    case NCI_ADAPTER_REACTIVATING_TARGET:
+        if (nci_adapter_intf_info_matches(priv->active_intf, ntf)) {
+            GDEBUG("Target reactivated");
+            nci_adapter_set_internal_state(priv, NCI_ADAPTER_HAVE_TARGET);
+            nfc_target_reactivated(self->target);
+        } else {
+            GDEBUG("Different tag has arrived, dropping the old one");
+            nci_adapter_set_internal_state(priv, NCI_ADAPTER_IDLE);
+            nci_adapter_drop_target(self);
+            /* Continue to object detection */
+        }
+        break;
+    }
+
+    /* Object detection logic */
+    if (!self->target && !priv->initiator) {
+        NfcTarget* target = self->target = nci_target_new(self, ntf);
+
+        if (target) {
+            nci_adapter_set_internal_state(priv, NCI_ADAPTER_HAVE_TARGET);
+
+            /* Check if it's a peer interface */
+            if (!nci_adapter_create_peer_initiator(self, target, ntf)) {
+               /* Otherwise assume a tag */
+                nci_adapter_intf_info_free(priv->active_intf);
+                priv->active_intf = nci_adapter_intf_info_new(ntf);
+                if (!nci_adapter_create_known_tag(self, target, ntf)) {
+                    NfcParamPoll poll;
+
+                    nci_adapter_set_active_tag(priv,
+                        nfc_adapter_add_other_tag2(adapter, target,
+                            nci_adapter_get_mode_param(&poll, ntf)));
+                }
+            }
+        } else {
+            /* Try initiator then */
+            NfcInitiator* initiator = nci_initiator_new(self, ntf);
+
+            if (initiator) {
+                if (nci_adapter_create_peer_target(self, initiator, ntf) ||
+                    nci_adapter_create_host(self, initiator, ntf)) {
+                    /* Keep the initiator */
+                    priv->initiator = initiator;
+                    nci_adapter_intf_info_free(priv->active_intf);
+                    priv->active_intf = nci_adapter_intf_info_new(ntf);
+                    nci_adapter_set_internal_state(priv,
+                        NCI_ADAPTER_HAVE_INITIATOR);
+                } else {
+                    nfc_initiator_unref(initiator);
+                }
+            }
+        }
+    }
+
+    /* Start periodic presence checks */
+    if (nci_adapter_need_presence_checks(self)) {
+        if (!priv->presence_check_timer) {
+            priv->presence_check_timer = g_timeout_add(PRESENCE_CHECK_PERIOD_MS,
+                nci_adapter_presence_check_timer, self);
+        }
+    } else {
+        gutil_source_clear(&priv->presence_check_timer);
+    }
+
+    /* If we don't know what this is, switch back to DISCOVERY */
+    if (!self->target && !priv->initiator) {
+        GDEBUG("No idea what this is");
+        nci_core_set_state(nci, NCI_RFST_IDLE);
+    }
+}
+
+static
+void
+nci_adapter_deactivation(
+    NciAdapter* self)
+{
+    NciAdapterPriv* priv = self->priv;
+
+    /* Update the adapter state */
+    switch (priv->internal_state) {
+    case NCI_ADAPTER_REACTIVATING_TARGET:
+        break;
+    case NCI_ADAPTER_REACTIVATING_CE:
+        /* Most likely a reset to lock the CE tech */
+        break;
+    case NCI_ADAPTER_REACTIVATED_CE:
+        nci_adapter_set_internal_state(priv, NCI_ADAPTER_REACTIVATING_CE);
+        nci_adapter_start_ce_reactivation_timer(self);
+        break;
+    case NCI_ADAPTER_HAVE_INITIATOR:
+        if (priv->host) {
+            NCI_TECH ce_tech = NCI_TECH_NONE;
+
+            /* Lock the card emulation tech */
+            switch (priv->initiator->technology) {
+            case NFC_TECHNOLOGY_A:
+                ce_tech = NCI_TECH_A_LISTEN;
+                break;
+            case NFC_TECHNOLOGY_B:
+                ce_tech = NCI_TECH_B_LISTEN;
+                break;
+            case NFC_TECHNOLOGY_F:
+            case NFC_TECHNOLOGY_UNKNOWN:
+                break;
+            }
+
+            nci_adapter_set_internal_state(priv, NCI_ADAPTER_REACTIVATING_CE);
+            nci_adapter_start_ce_reactivation_timer(self);
+
+            /*
+             * The same technology must be used for reactivation, otherwise
+             * the peer may not (and most likely won't) recognize us as the
+             * came card.
+             */
+            if (ce_tech) {
+                const NCI_TECH tech = priv->active_techs & ce_tech;
+
+                priv->active_tech_mask = ce_tech;
+                nci_core_set_tech(self->nci, tech);
+            }
+            break;
+        }
+        /* fallthrough */
+    case NCI_ADAPTER_IDLE:
+    case NCI_ADAPTER_HAVE_TARGET:
+        nci_adapter_set_internal_state(priv, NCI_ADAPTER_IDLE);
+        nci_adapter_drop_all(self);
+        break;
+    }
+}
+
+/*==========================================================================*
+ * NCI core events
+ *==========================================================================*/
+
 static
 void
 nci_adapter_nci_intf_activated(
@@ -831,69 +1238,10 @@ nci_adapter_nci_intf_activated(
     void* user_data)
 {
     NciAdapter* self = THIS(user_data);
-    NciAdapterPriv* priv = self->priv;
-    NfcTarget* reactivated = NULL;
 
-    nci_adapter_drop_initiator(priv);
-    if (!priv->reactivating) {
-        /* Drop the previous target, if any */
-        nci_adapter_drop_target(self);
-    } else if (self->target &&
-        !nci_adapter_intf_info_matches(priv->active_intf, ntf)) {
-        GDEBUG("Different tag has arrived, dropping the old one");
-        nci_adapter_drop_target(self);
-    }
-
-    if (self->target) {
-        /* The same target has arrived or we have been woken up */
-        priv->reactivating = FALSE;
-        reactivated = self->target;
-    } else {
-        NfcAdapter* adapter = NFC_ADAPTER(self);
-        NfcTarget* target = self->target = nci_target_new(self, ntf);
-        NfcInitiator* initiator = target ? NULL : /* Try initiator then */
-            (priv->initiator = nci_initiator_new(self, ntf));
-
-        if (target) {
-            /* Check if it's a peer interface */
-            if (!nci_adapter_create_peer_initiator(adapter, target, ntf)) {
-                NfcTag* tag = NULL;
-
-               /* Otherwise assume a tag */
-                priv->active_intf = nci_adapter_intf_info_new(ntf);
-                if (ntf->mode_param) {
-                    tag = nci_adapter_create_known_tag(adapter, target, ntf);
-                }
-                if (!tag) {
-                    NfcParamPoll poll;
-
-                    nfc_adapter_add_other_tag2(adapter, target,
-                        nci_adapter_get_mode_param(&poll, ntf));
-                }
-            }
-        } else if (initiator) {
-            /* We don't support card emulation (yet), assume a peer */
-            nci_adapter_create_peer_target(adapter, initiator, ntf);
-        }
-    }
-
-    /* Start periodic presence checks */
-    if (nci_adapter_need_presence_checks(self)) {
-        priv->presence_check_timer = g_timeout_add(PRESENCE_CHECK_PERIOD_MS,
-            nci_adapter_presence_check_timer, self);
-    }
-
-    /* Notify the core that target has beed reactivated */
-    if (reactivated) {
-        GDEBUG("Target reactivated");
-        nfc_target_reactivated(reactivated);
-    }
-
-    /* If we don't know what this is, switch back to DISCOVERY */
-    if (!self->target && !priv->initiator) {
-        GDEBUG("No idea what this is");
-        nci_core_set_state(nci, NCI_RFST_IDLE);
-    }
+    g_object_ref(self);
+    nci_adapter_activation(self, ntf);
+    g_object_unref(self);
 }
 
 static
@@ -932,6 +1280,7 @@ nci_adapter_init_base(
     NciAdapterPriv* priv = self->priv;
 
     self->nci = nci_core_new(io);
+    priv->active_techs = priv->supported_techs = nci_core_get_tech(self->nci);
     priv->nci_event_id[CORE_EVENT_CURRENT_STATE] =
         nci_core_add_current_state_changed_handler(self->nci,
             nci_adapter_nci_current_state_changed, self);
@@ -955,10 +1304,7 @@ nci_adapter_finalize_core(
 {
     NciAdapterPriv* priv = self->priv;
 
-    if (priv->mode_check_id) {
-        g_source_remove(priv->mode_check_id);
-        priv->mode_check_id = 0;
-    }
+    gutil_source_clear(&priv->mode_check_id);
     if (self->nci) {
         nci_core_remove_all_handlers(self->nci, priv->nci_event_id);
         nci_core_free(self->nci);
@@ -975,17 +1321,17 @@ nci_adapter_reactivate(
         NciAdapterPriv* priv = self->priv;
         NciCore* nci = self->nci;
 
-        if (priv->active_intf && !priv->reactivating && nci &&
+        if (priv->active_intf &&
+            priv->internal_state == NCI_ADAPTER_HAVE_TARGET && nci &&
             ((nci->current_state == NCI_RFST_POLL_ACTIVE &&
               nci->next_state == NCI_RFST_POLL_ACTIVE) ||
              (nci->current_state == NCI_RFST_LISTEN_ACTIVE &&
               nci->next_state == NCI_RFST_LISTEN_ACTIVE))) {
-            priv->reactivating = TRUE;
-            if (priv->presence_check_timer) {
-                /* Stop presence checks for the time being */
-                g_source_remove(priv->presence_check_timer);
-                priv->presence_check_timer = 0;
-            }
+            GDEBUG("Reactivating the interface");
+            nci_adapter_set_internal_state(priv,
+                NCI_ADAPTER_REACTIVATING_TARGET);
+            /* Stop presence checks for the time being */
+            gutil_source_clear(&priv->presence_check_timer);
             /* Switch to discovery and expect the same target to reappear */
             nci_core_set_state(nci, NCI_RFST_DISCOVERY);
             return TRUE;
@@ -1017,7 +1363,7 @@ nci_adapter_deactivate_initiator(
         NciAdapterPriv* priv = self->priv;
 
         if (priv->initiator == initiator) {
-            nci_adapter_drop_initiator(priv);
+            nci_adapter_drop_initiator(self);
             if (self->parent.powered) {
                 nci_core_set_state(self->nci, NCI_RFST_DISCOVERY);
             }
@@ -1092,22 +1438,67 @@ nci_adapter_next_state_changed(
     NciCore* nci = self->nci;
 
     switch (nci->next_state) {
-    case NCI_RFST_POLL_ACTIVE:
+    case NCI_RFST_IDLE:
+        if (nci->current_state > NCI_RFST_IDLE) {
+            nci_adapter_deactivation(self);
+        }
         break;
     case NCI_RFST_DISCOVERY:
+        if (nci->current_state != NCI_RFST_IDLE) {
+            nci_adapter_deactivation(self);
+        }
+        break;
     case NCI_RFST_W4_ALL_DISCOVERIES:
     case NCI_RFST_W4_HOST_SELECT:
-        if (priv->reactivating) {
-            /* Keep the target if we are waiting for it to reappear */
-            break;
-        }
-        /* fallthrough */
+    case NCI_RFST_POLL_ACTIVE:
+    case NCI_RFST_LISTEN_ACTIVE:
+    case NCI_RFST_LISTEN_SLEEP:
+        break;
     default:
+        nci_adapter_set_internal_state(priv, NCI_ADAPTER_IDLE);
         nci_adapter_drop_all(self);
         break;
     }
     nci_adapter_state_check(self);
     nci_adapter_mode_check(self);
+}
+
+static
+NFC_TECHNOLOGY
+nci_adapter_get_supported_techs(
+    NfcAdapter* adapter)
+{
+    NciAdapter* self = THIS(adapter);
+    NciAdapterPriv* priv = self->priv;
+    NFC_TECHNOLOGY techs = NFC_TECHNOLOGY_UNKNOWN;
+
+    if (priv->supported_techs & NCI_TECH_A) techs |= NFC_TECHNOLOGY_A;
+    if (priv->supported_techs & NCI_TECH_B) techs |= NFC_TECHNOLOGY_B;
+    if (priv->supported_techs & NCI_TECH_F) techs |= NFC_TECHNOLOGY_F;
+    return techs;
+}
+
+static
+void
+nci_adapter_set_allowed_techs(
+    NfcAdapter* adapter,
+    NFC_TECHNOLOGY techs)
+{
+    NciAdapter* self = THIS(adapter);
+    NciAdapterPriv* priv = self->priv;
+    NCI_TECH affected_techs = NCI_TECH_A | NCI_TECH_B | NCI_TECH_F;
+
+    priv->active_techs = priv->supported_techs & ~affected_techs;
+    if (techs & NFC_TECHNOLOGY_A) {
+        priv->active_techs |= priv->supported_techs & NCI_TECH_A;
+    }
+    if (techs & NFC_TECHNOLOGY_B) {
+        priv->active_techs |= priv->supported_techs & NCI_TECH_B;
+    }
+    if (techs & NFC_TECHNOLOGY_F) {
+        priv->active_techs |= priv->supported_techs & NCI_TECH_F;
+    }
+    nci_core_set_tech(self->nci, priv->active_techs & priv->active_tech_mask);
 }
 
 /*==========================================================================*
@@ -1124,10 +1515,13 @@ nci_adapter_init(
         NciAdapterPriv);
 
     self->priv = priv;
+    priv->active_tech_mask = NCI_TECH_ALL;
+    priv->internal_state = NCI_ADAPTER_IDLE;
     adapter->supported_modes = NFC_MODE_READER_WRITER |
-        NFC_MODE_P2P_INITIATOR | NFC_MODE_P2P_TARGET;
+        NFC_MODE_P2P_INITIATOR | NFC_MODE_P2P_TARGET |
+        NFC_MODE_CARD_EMILATION;
     adapter->supported_tags = NFC_TAG_TYPE_MIFARE_ULTRALIGHT;
-    adapter->supported_protocols =  NFC_PROTOCOL_T2_TAG |
+    adapter->supported_protocols = NFC_PROTOCOL_T2_TAG |
         NFC_PROTOCOL_T4A_TAG | NFC_PROTOCOL_T4B_TAG |
         NFC_PROTOCOL_NFC_DEP;
 }
@@ -1146,7 +1540,15 @@ void
 nci_adapter_finalize(
     GObject* object)
 {
-    nci_adapter_finalize_core(THIS(object));
+    NciAdapter* self = THIS(object);
+    NciAdapterPriv* priv = self->priv;
+
+    nci_adapter_set_active_tag(priv, NULL);
+    nci_adapter_set_active_peer(priv, NULL);
+    nci_adapter_set_active_host(priv, NULL);
+    gutil_source_clear(&priv->ce_reactivation_timer);
+    gutil_source_clear(&priv->presence_check_timer);
+    nci_adapter_finalize_core(self);
     G_OBJECT_CLASS(PARENT_CLASS)->finalize(object);
 }
 
@@ -1163,6 +1565,8 @@ nci_adapter_class_init(
     klass->next_state_changed = nci_adapter_next_state_changed;
     adapter_class->submit_mode_request = nci_adapter_submit_mode_request;
     adapter_class->cancel_mode_request = nci_adapter_cancel_mode_request;
+    adapter_class->get_supported_techs = nci_adapter_get_supported_techs;
+    adapter_class->set_allowed_techs = nci_adapter_set_allowed_techs;
     object_class->dispose = nci_adapter_dispose;
     object_class->finalize = nci_adapter_finalize;
 }

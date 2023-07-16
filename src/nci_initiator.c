@@ -1,6 +1,6 @@
 /*
+ * Copyright (C) 2020-2024 Slava Monich <slava@monich.com>
  * Copyright (C) 2020 Jolla Ltd.
- * Copyright (C) 2020 Slava Monich <slava.monich@jolla.com>
  *
  * You may use this file under the terms of the BSD license as follows:
  *
@@ -8,21 +8,23 @@
  * modification, are permitted provided that the following conditions
  * are met:
  *
- *   1. Redistributions of source code must retain the above copyright
- *      notice, this list of conditions and the following disclaimer.
- *   2. Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in
- *      the documentation and/or other materials provided with the
- *      distribution.
- *   3. Neither the names of the copyright holders nor the names of its
- *      contributors may be used to endorse or promote products derived
- *      from this software without specific prior written permission.
+ *  1. Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *
+ *  2. Redistributions in binary form must reproduce the above copyright
+ *     notice, this list of conditions and the following disclaimer
+ *     in the documentation and/or other materials provided with the
+ *     distribution.
+ *
+ *  3. Neither the names of the copyright holders nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
  * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
  * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
  * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
  * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
  * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
@@ -83,6 +85,8 @@ nci_initiator_cancel_response(
             nci_core_cancel(self->adapter->nci, self->response_in_progress);
         }
         self->response_in_progress = 0;
+        nfc_initiator_response_sent(&self->initiator,
+            NFC_TRANSMIT_STATUS_ERROR);
     }
 }
 
@@ -174,7 +178,25 @@ nci_initiator_new(
             protocol = NFC_PROTOCOL_NFC_DEP;
             break;
         case NCI_PROTOCOL_ISO_DEP:
-            GDEBUG("Card emulation (ISO-DEP) not supported yet");
+            /*
+             * NFC Controller Interface (NCI) Specification:
+             *
+             * Listen-side ISO-DEP RF Interface MAY be used for Card
+             * Emulation Mode when the Remote NFC Endpoint uses ISO-DEP
+             * based on NFC-A or NFC-B.
+             */
+            if (tech == NFC_TECHNOLOGY_A) {
+                /*
+                 * For historical reasons nfcd API has two contstants for
+                 * ISO-DEP protocol. It's weird but let's keep it this way
+                 * to avoid introducing even more constants (the old ones
+                 * can't be removed or changed for backward compatibility
+                 * reasons)
+                 */
+                protocol = NFC_PROTOCOL_T4A_TAG;
+            } else if (tech == NFC_TECHNOLOGY_B) {
+                protocol = NFC_PROTOCOL_T4B_TAG;
+            }
             break;
         default:
             GDEBUG("Unsupported initiator protocol 0x%02x", ntf->protocol);
@@ -185,7 +207,7 @@ nci_initiator_new(
             NciInitiator* self = nci_initiator_new_with_technology(tech);
             NfcInitiator* initiator = &self->initiator;
 
-            initiator->protocol = NFC_PROTOCOL_NFC_DEP;
+            initiator->protocol = protocol;
             self->adapter = adapter;
             g_object_add_weak_pointer(G_OBJECT(adapter),
                 (gpointer*) &self->adapter);
@@ -241,7 +263,10 @@ void
 nci_initiator_gone(
     NfcInitiator* initiator)
 {
-    nci_initiator_drop_adapter(THIS(initiator));
+    NciInitiator* self = THIS(initiator);
+
+    nci_initiator_cancel_response(self);
+    nci_initiator_drop_adapter(self);
     NFC_INITIATOR_CLASS(PARENT_CLASS)->gone(initiator);
 }
 
@@ -261,7 +286,10 @@ void
 nci_initiator_finalize(
     GObject* object)
 {
-    nci_initiator_drop_adapter(THIS(object));
+    NciInitiator* self = THIS(object);
+
+    nci_initiator_cancel_response(self);
+    nci_initiator_drop_adapter(self);
     G_OBJECT_CLASS(PARENT_CLASS)->finalize(object);
 }
 
