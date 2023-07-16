@@ -10,9 +10,10 @@ Source: %{name}-%{version}.tar.bz2
 %define nfcd_version 1.1.4
 %define libncicore_version 1.1.13
 %define libglibutil_version 1.0.31
+%define glib_version 2.32
 
 BuildRequires: pkgconfig
-BuildRequires: pkgconfig(glib-2.0)
+BuildRequires: pkgconfig(glib-2.0) >= %{glib_version}
 BuildRequires: pkgconfig(libglibutil) >= %{libglibutil_version}
 BuildRequires: pkgconfig(libncicore) >= %{libncicore_version}
 BuildRequires: pkgconfig(nfcd-plugin) >= %{nfcd_version}
@@ -21,6 +22,7 @@ BuildRequires: pkgconfig(nfcd-plugin) >= %{nfcd_version}
 BuildRequires: pkgconfig(rpm)
 %define license_support %(pkg-config --exists 'rpm >= 4.11'; echo $?)
 
+Requires: glib2 >= %{glib_version}
 Requires: libglibutil >= %{libglibutil_version}
 Requires: libncicore >= %{libncicore_version}
 Requires: nfcd >= %{nfcd_version}

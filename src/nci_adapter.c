@@ -1,6 +1,6 @@
 /*
+ * Copyright (C) 2019-2023 Slava Monich <slava@monich.com>
  * Copyright (C) 2019-2021 Jolla Ltd.
- * Copyright (C) 2019-2021 Slava Monich <slava.monich@jolla.com>
  * Copyright (C) 2020 Open Mobile Platform LLC.
  *
  * You may use this file under the terms of the BSD license as follows:
@@ -35,8 +35,6 @@
  * are those of the authors and should not be interpreted as representing
  * any official policies, either expressed or implied.
  */
-
-#define GLIB_DISABLE_DEPRECATION_WARNINGS
 
 #include "nci_adapter_impl.h"
 #include "nci_plugin_p.h"
