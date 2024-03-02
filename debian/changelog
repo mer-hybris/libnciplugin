@@ -1,3 +1,9 @@
+libnciplugin (1.1.6) unstable; urgency=low
+
+  * Don't complain about STATUS_OK_n_BIT transmission status
+
+ -- Slava Monich <slava@monich.com>  Sat, 02 Mar 2024 19:41:01 +0200
+
 libnciplugin (1.1.5) unstable; urgency=low
 
   * Use longer timeout for ISO-DEP targets
