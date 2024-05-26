@@ -1,3 +1,9 @@
+libnciplugin (1.2.0) unstable; urgency=low
+
+  * Support for Card Emulation
+
+ -- Slava Monich <slava@monich.com>  Mon, 27 May 2024 02:40:43 +0300
+
 libnciplugin (1.1.6) unstable; urgency=low
 
   * Don't complain about STATUS_OK_n_BIT transmission status
