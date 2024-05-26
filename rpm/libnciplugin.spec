@@ -22,6 +22,9 @@ BuildRequires: pkgconfig(nfcd-plugin) >= %{nfcd_version}
 BuildRequires: pkgconfig(rpm)
 %define license_support %(pkg-config --exists 'rpm >= 4.11'; echo $?)
 
+# make_build macro appeared in rpm 4.12
+%{!?make_build:%define make_build make %{_smp_mflags}}
+
 Requires: glib2 >= %{glib_version}
 Requires: libglibutil >= %{libglibutil_version}
 Requires: libncicore >= %{libncicore_version}
@@ -43,7 +46,7 @@ This package contains the development library for %{name}.
 %setup -q
 
 %build
-make %{_smp_mflags} LIBDIR=%{_libdir} KEEP_SYMBOLS=1 release pkgconfig
+%make_build LIBDIR=%{_libdir} KEEP_SYMBOLS=1 release pkgconfig
 
 %install
 make LIBDIR=%{_libdir} DESTDIR=%{buildroot} install-dev
