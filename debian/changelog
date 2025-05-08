@@ -1,3 +1,9 @@
+libnciplugin (1.2.1) unstable; urgency=low
+
+  * Support for LA_NFCID1 adapter parameter
+
+ -- Slava Monich <slava@monich.com>  Fri, 09 May 2025 02:40:22 +0300
+
 libnciplugin (1.2.0) unstable; urgency=low
 
   * Support for Card Emulation
