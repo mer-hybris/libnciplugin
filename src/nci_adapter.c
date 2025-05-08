@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2024 Slava Monich <slava@monich.com>
+ * Copyright (C) 2019-2025 Slava Monich <slava@monich.com>
  * Copyright (C) 2019-2021 Jolla Ltd.
  * Copyright (C) 2020 Open Mobile Platform LLC.
  *
@@ -62,6 +62,7 @@ enum {
     CORE_EVENT_CURRENT_STATE,
     CORE_EVENT_NEXT_STATE,
     CORE_EVENT_INTF_ACTIVATED,
+    CORE_EVENT_PARAMS_CHANGED,
     CORE_EVENT_COUNT
 };
 
@@ -145,6 +146,7 @@ struct nci_adapter_priv {
     NfcInitiator* initiator;
     NCI_ADAPTER_STATE internal_state;
     guint ce_reactivation_timer;
+    NFC_ADAPTER_PARAM* supported_params;
     NCI_TECH supported_techs;
     NCI_TECH active_techs;
     NCI_TECH active_tech_mask;
@@ -153,13 +155,14 @@ struct nci_adapter_priv {
     NfcPeer* peer;   /* Weak pointer */
 };
 
-#define PARENT_CLASS nci_adapter_parent_class
-#define THIS_TYPE NCI_TYPE_ADAPTER
 #define THIS(obj) NCI_ADAPTER(obj)
-#define NCI_ADAPTER_GET_CLASS(obj) G_TYPE_INSTANCE_GET_CLASS((obj), \
-        NCI_TYPE_ADAPTER, NciAdapterClass)
+#define THIS_TYPE NCI_TYPE_ADAPTER
+#define PARENT_TYPE NFC_TYPE_ADAPTER
+#define PARENT_CLASS nci_adapter_parent_class
+#define GET_THIS_CLASS(obj) G_TYPE_INSTANCE_GET_CLASS(obj, THIS_TYPE, \
+        NciAdapterClass)
 
-G_DEFINE_ABSTRACT_TYPE(NciAdapter, nci_adapter, NFC_TYPE_ADAPTER)
+G_DEFINE_ABSTRACT_TYPE(NciAdapter, nci_adapter, PARENT_TYPE)
 
 #define PRESENCE_CHECK_PERIOD_MS (250)
 #define CE_REACTIVATION_TIMEOUT_MS (1500)
@@ -1251,9 +1254,8 @@ nci_adapter_nci_next_state_changed(
     void* user_data)
 {
     NciAdapter* self = THIS(user_data);
-    NciAdapterClass* klass = NCI_ADAPTER_GET_CLASS(self);
 
-    klass->next_state_changed(self);
+    GET_THIS_CLASS(self)->next_state_changed(self);
 }
 
 static
@@ -1263,9 +1265,21 @@ nci_adapter_nci_current_state_changed(
     void* user_data)
 {
     NciAdapter* self = THIS(user_data);
-    NciAdapterClass* klass = NCI_ADAPTER_GET_CLASS(self);
 
-    klass->current_state_changed(self);
+    GET_THIS_CLASS(self)->current_state_changed(self);
+}
+
+static
+void
+nci_adapter_nci_param_changed(
+    NciCore* nci,
+    NCI_CORE_PARAM key,
+    void* user_data)
+{
+    if (key == NCI_CORE_PARAM_LA_NFCID1) {
+        nfc_adapter_param_change_notify(NFC_ADAPTER(user_data),
+            NFC_ADAPTER_PARAM_LA_NFCID1);
+    }
 }
 
 /*==========================================================================*
@@ -1290,6 +1304,9 @@ nci_adapter_init_base(
     priv->nci_event_id[CORE_EVENT_INTF_ACTIVATED] =
         nci_core_add_intf_activated_handler(self->nci,
             nci_adapter_nci_intf_activated, self);
+    priv->nci_event_id[CORE_EVENT_PARAMS_CHANGED] =
+        nci_core_add_params_change_handler(self->nci,
+            nci_adapter_nci_param_changed, self);
 }
 
 /*
@@ -1501,6 +1518,94 @@ nci_adapter_set_allowed_techs(
     nci_core_set_tech(self->nci, priv->active_techs & priv->active_tech_mask);
 }
 
+static
+const NFC_ADAPTER_PARAM*
+nci_adapter_list_params(
+    NfcAdapter* adapter)
+{
+    NciAdapter* self = THIS(adapter);
+    NciAdapterPriv* priv = self->priv;
+    static const NFC_ADAPTER_PARAM nci_adapter_param_ids[] = {
+        NFC_ADAPTER_PARAM_LA_NFCID1,
+        NFC_ADAPTER_PARAM_NONE
+    };
+
+    /* Allocate the list on demand */
+    if (!priv->supported_params) {
+        priv->supported_params =
+            nfc_adapter_param_list_merge(nci_adapter_param_ids,
+                 NFC_ADAPTER_CLASS(PARENT_CLASS)->list_params(adapter),
+                 NULL);
+    }
+    return priv->supported_params;
+}
+
+static
+NfcAdapterParamValue*
+nci_adapter_get_param(
+    NfcAdapter* adapter,
+    NFC_ADAPTER_PARAM id) /* Caller frees the result with g_free() */
+{
+    if (id == NFC_ADAPTER_PARAM_LA_NFCID1) {
+        NciAdapter* self = THIS(adapter);
+        NciCoreParamValue value;
+
+        memset(&value, 0, sizeof(value));
+        if (nci_core_get_param(self->nci, NCI_CORE_PARAM_LA_NFCID1, &value)) {
+            NfcAdapterParamValue* out = g_new0(NfcAdapterParamValue, 1);
+
+            /* NCI_CORE_PARAM_LA_NFCID1 => NFC_ADAPTER_PARAM_LA_NFCID1 */
+            out->nfcid1.len = MIN(value.nfcid1.len, sizeof(out->nfcid1.bytes));
+            memcpy(out->nfcid1.bytes, value.nfcid1.bytes, value.nfcid1.len);
+            return out;
+        }
+    }
+    return NFC_ADAPTER_CLASS(PARENT_CLASS)->get_param(adapter, id);
+}
+
+static
+void
+nci_adapter_set_params(
+    NfcAdapter* adapter,
+    const NfcAdapterParam* const* params, /* NULL terminated list */
+    gboolean reset) /* Reset all params that are not being set */
+{
+    NciAdapter* self = THIS(adapter);
+    const NfcAdapterParamValue* set_la_nfcid1 = NULL;
+    const NfcAdapterParam* const* ptr = params;
+
+    while (*ptr) {
+        const NfcAdapterParam* p = *ptr++;
+
+        if (p->id == NFC_ADAPTER_PARAM_LA_NFCID1) {
+            set_la_nfcid1 = &p->value;
+        }
+    }
+
+    if (set_la_nfcid1) {
+        const NciCoreParam* nci_params[2];
+        NciCoreParam nci_la_nfcid1;
+
+        /* NFC_ADAPTER_PARAM_LA_NFCID1 => NCI_CORE_PARAM_LA_NFCID1 */
+        memset(&nci_la_nfcid1, 0, sizeof(nci_la_nfcid1));
+        nci_la_nfcid1.key = NCI_CORE_PARAM_LA_NFCID1;
+        if (set_la_nfcid1->nfcid1.len) {
+            const NfcId1* src = &set_la_nfcid1->nfcid1;
+            NciNfcid1* dest = &nci_la_nfcid1.value.nfcid1;
+
+            dest->len = MIN(src->len, sizeof(dest->bytes));
+            memcpy(dest->bytes, src->bytes, dest->len);
+        }
+        nci_params[0] = &nci_la_nfcid1;
+        nci_params[1] = NULL;
+        nci_core_set_params(self->nci, nci_params, reset);
+    } else if (reset) {
+        nci_core_set_params(self->nci, NULL, reset);
+    }
+
+    NFC_ADAPTER_CLASS(PARENT_CLASS)->set_params(adapter, params, reset);
+}
+
 /*==========================================================================*
  * Internals
  *==========================================================================*/
@@ -1548,6 +1653,7 @@ nci_adapter_finalize(
     nci_adapter_set_active_host(priv, NULL);
     gutil_source_clear(&priv->ce_reactivation_timer);
     gutil_source_clear(&priv->presence_check_timer);
+    g_free(priv->supported_params);
     nci_adapter_finalize_core(self);
     G_OBJECT_CLASS(PARENT_CLASS)->finalize(object);
 }
@@ -1567,6 +1673,9 @@ nci_adapter_class_init(
     adapter_class->cancel_mode_request = nci_adapter_cancel_mode_request;
     adapter_class->get_supported_techs = nci_adapter_get_supported_techs;
     adapter_class->set_allowed_techs = nci_adapter_set_allowed_techs;
+    adapter_class->list_params = nci_adapter_list_params;
+    adapter_class->get_param = nci_adapter_get_param;
+    adapter_class->set_params = nci_adapter_set_params;
     object_class->dispose = nci_adapter_dispose;
     object_class->finalize = nci_adapter_finalize;
 }
