@@ -1276,9 +1276,19 @@ nci_adapter_nci_param_changed(
     NCI_CORE_PARAM key,
     void* user_data)
 {
-    if (key == NCI_CORE_PARAM_LA_NFCID1) {
-        nfc_adapter_param_change_notify(NFC_ADAPTER(user_data),
-            NFC_ADAPTER_PARAM_LA_NFCID1);
+    NfcAdapter* adapter = NFC_ADAPTER(user_data);
+
+    switch (key) {
+    case NCI_CORE_PARAM_LA_NFCID1:
+        nfc_adapter_param_change_notify(adapter, NFC_ADAPTER_PARAM_LA_NFCID1);
+        break;
+    case NCI_CORE_PARAM_LI_A_HB:
+        nfc_adapter_param_change_notify(adapter, NFC_ADAPTER_PARAM_LI_A_HB);
+        break;
+    case NCI_CORE_PARAM_LLC_VERSION:
+    case NCI_CORE_PARAM_LLC_WKS:
+    case NCI_CORE_PARAM_COUNT:
+        break;
     }
 }
 
@@ -1527,6 +1537,7 @@ nci_adapter_list_params(
     NciAdapterPriv* priv = self->priv;
     static const NFC_ADAPTER_PARAM nci_adapter_param_ids[] = {
         NFC_ADAPTER_PARAM_LA_NFCID1,
+        NFC_ADAPTER_PARAM_LI_A_HB,
         NFC_ADAPTER_PARAM_NONE
     };
 
@@ -1546,19 +1557,37 @@ nci_adapter_get_param(
     NfcAdapter* adapter,
     NFC_ADAPTER_PARAM id) /* Caller frees the result with g_free() */
 {
-    if (id == NFC_ADAPTER_PARAM_LA_NFCID1) {
-        NciAdapter* self = THIS(adapter);
-        NciCoreParamValue value;
+    NciAdapter* self = THIS(adapter);
+    NciCoreParamValue value;
 
-        memset(&value, 0, sizeof(value));
+    memset(&value, 0, sizeof(value));
+    switch (id) {
+    case NFC_ADAPTER_PARAM_LA_NFCID1:
         if (nci_core_get_param(self->nci, NCI_CORE_PARAM_LA_NFCID1, &value)) {
             NfcAdapterParamValue* out = g_new0(NfcAdapterParamValue, 1);
 
             /* NCI_CORE_PARAM_LA_NFCID1 => NFC_ADAPTER_PARAM_LA_NFCID1 */
             out->nfcid1.len = MIN(value.nfcid1.len, sizeof(out->nfcid1.bytes));
-            memcpy(out->nfcid1.bytes, value.nfcid1.bytes, value.nfcid1.len);
+            memcpy(out->nfcid1.bytes, value.nfcid1.bytes, out->nfcid1.len);
             return out;
         }
+        return NULL;
+
+    case NFC_ADAPTER_PARAM_LI_A_HB:
+        if (nci_core_get_param(self->nci, NCI_CORE_PARAM_LI_A_HB, &value)) {
+            NfcAdapterParamValue* out = g_new0(NfcAdapterParamValue, 1);
+
+            /* NCI_CORE_PARAM_LI_A_HB => NFC_ADAPTER_PARAM_LI_A_HB */
+            out->hb.len = MIN(value.hb.len, sizeof(out->hb.bytes));
+            memcpy(out->hb.bytes, value.hb.bytes, out->hb.len);
+            return out;
+        }
+        return NULL;
+
+    case NFC_ADAPTER_PARAM_NONE:
+    case NFC_ADAPTER_PARAM_T4_NDEF:
+    case NFC_ADAPTER_PARAM_COUNT:
+        break;
     }
     return NFC_ADAPTER_CLASS(PARENT_CLASS)->get_param(adapter, id);
 }
@@ -1571,38 +1600,61 @@ nci_adapter_set_params(
     gboolean reset) /* Reset all params that are not being set */
 {
     NciAdapter* self = THIS(adapter);
-    const NfcAdapterParamValue* set_la_nfcid1 = NULL;
+    const NfcId1* nfc_la_nfcid1 = NULL;
+    const NfcAtsHb* nfc_li_a_hb = NULL;
+    const NciCoreParam* nci_params[3];
+    NciCoreParam nci_param[G_N_ELEMENTS(nci_params)];
+    guint np = 0;
     const NfcAdapterParam* const* ptr = params;
 
     while (*ptr) {
         const NfcAdapterParam* p = *ptr++;
 
-        if (p->id == NFC_ADAPTER_PARAM_LA_NFCID1) {
-            set_la_nfcid1 = &p->value;
+        switch (p->id) {
+        case NFC_ADAPTER_PARAM_LA_NFCID1:
+            nfc_la_nfcid1 = &p->value.nfcid1;
+            break;
+        case NFC_ADAPTER_PARAM_LI_A_HB:
+            nfc_li_a_hb = &p->value.hb;
+            break;
+        case NFC_ADAPTER_PARAM_NONE:
+        case NFC_ADAPTER_PARAM_T4_NDEF:
+        case NFC_ADAPTER_PARAM_COUNT:
+            break;
         }
     }
 
-    if (set_la_nfcid1) {
-        const NciCoreParam* nci_params[2];
-        NciCoreParam nci_la_nfcid1;
+    if (nfc_la_nfcid1) {
+        NciCoreParam* nci_la_nfcid1 = nci_param + np;
+        NciNfcid1* dest = &nci_la_nfcid1->value.nfcid1;
+        const gsize max_size = sizeof(dest->bytes);
 
         /* NFC_ADAPTER_PARAM_LA_NFCID1 => NCI_CORE_PARAM_LA_NFCID1 */
-        memset(&nci_la_nfcid1, 0, sizeof(nci_la_nfcid1));
-        nci_la_nfcid1.key = NCI_CORE_PARAM_LA_NFCID1;
-        if (set_la_nfcid1->nfcid1.len) {
-            const NfcId1* src = &set_la_nfcid1->nfcid1;
-            NciNfcid1* dest = &nci_la_nfcid1.value.nfcid1;
-
-            dest->len = MIN(src->len, sizeof(dest->bytes));
-            memcpy(dest->bytes, src->bytes, dest->len);
-        }
-        nci_params[0] = &nci_la_nfcid1;
-        nci_params[1] = NULL;
-        nci_core_set_params(self->nci, nci_params, reset);
-    } else if (reset) {
-        nci_core_set_params(self->nci, NULL, reset);
+        memset(nci_la_nfcid1, 0, sizeof(*nci_la_nfcid1));
+        nci_la_nfcid1->key = NCI_CORE_PARAM_LA_NFCID1;
+        dest->len = MIN(nfc_la_nfcid1->len, max_size);
+        memcpy(dest->bytes, nfc_la_nfcid1->bytes, dest->len);
+        memset(dest->bytes + dest->len, 0, max_size - dest->len);
+        nci_params[np++] = nci_la_nfcid1;
     }
 
+    if (nfc_li_a_hb) {
+        NciCoreParam* nci_li_a_hb = nci_param + np;
+        NciAtsHb* dest = &nci_li_a_hb->value.hb;
+        const gsize max_size = sizeof(dest->bytes);
+
+        /* NFC_ADAPTER_PARAM_LI_A_HB => NCI_CORE_PARAM_LI_A_HB */
+        memset(nci_li_a_hb, 0, sizeof(*nci_li_a_hb));
+        nci_li_a_hb->key = NCI_CORE_PARAM_LI_A_HB;
+        dest->len = MIN(nfc_li_a_hb->len, max_size);
+        memcpy(dest->bytes, nfc_li_a_hb->bytes, dest->len);
+        memset(dest->bytes + dest->len, 0, max_size - dest->len);
+        nci_params[np++] = nci_li_a_hb;
+    }
+
+    GASSERT(np < G_N_ELEMENTS(nci_params));
+    nci_params[np] = NULL;
+    nci_core_set_params(self->nci, nci_params, reset);
     NFC_ADAPTER_CLASS(PARENT_CLASS)->set_params(adapter, params, reset);
 }
 
