@@ -1,3 +1,9 @@
+libnciplugin (1.2.2) unstable; urgency=low
+
+  * Support for LI_A_HB adapter parameter
+
+ -- Slava Monich <slava@monich.com>  Tue, 30 Dec 2025 16:02:56 +0200
+
 libnciplugin (1.2.1) unstable; urgency=low
 
   * Support for LA_NFCID1 adapter parameter
