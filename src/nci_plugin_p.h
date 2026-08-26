@@ -84,6 +84,12 @@ nci_adapter_deactivate_initiator(
     NfcInitiator* initiator)
     G_GNUC_INTERNAL;
 
+/* See MIFARE_TAG_TIMEOUT_SEC in nci_adapter.c */
+void
+nci_adapter_renew_mifare_timeout(
+    NciAdapter* adapter)
+    G_GNUC_INTERNAL;
+
 #endif /* NCI_PLUGIN_PRIVATE_H */
 
 /*
