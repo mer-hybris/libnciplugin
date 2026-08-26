@@ -142,6 +142,7 @@ struct nci_adapter_priv {
     guint mode_check_id;
     guint presence_check_id;
     guint presence_check_timer;
+    guint mifare_timeout;
     NciAdapterIntfInfo* active_intf;
     NfcInitiator* initiator;
     NCI_ADAPTER_STATE internal_state;
@@ -166,6 +167,16 @@ G_DEFINE_ABSTRACT_TYPE(NciAdapter, nci_adapter, PARENT_TYPE)
 
 #define PRESENCE_CHECK_PERIOD_MS (250)
 #define CE_REACTIVATION_TIMEOUT_MS (1500)
+
+/*
+ * MIFARE Classic has no safe periodic presence check (see
+ * nci_adapter_need_presence_checks()), so without a time bound the
+ * adapter would latch onto the first tag forever. This is an idle
+ * timeout, not a hard ceiling: nci_adapter_renew_mifare_timeout() resets
+ * it on every real exchange, so it only fires once the tag actually goes
+ * quiet.
+ */
+#define MIFARE_TAG_TIMEOUT_SEC (8)
 
 #define RANDOM_UID_SIZE (4)
 #define RANDOM_UID_START_BYTE (0x08)
@@ -444,6 +455,7 @@ nci_adapter_drop_target(
         self->target = NULL;
         nci_adapter_clear_active_intf(priv);
         gutil_source_clear(&priv->presence_check_timer);
+        gutil_source_clear(&priv->mifare_timeout);
         nci_adapter_set_active_peer(priv, NULL);
         nci_adapter_set_active_tag(priv, NULL);
         if (priv->presence_check_id) {
@@ -494,8 +506,15 @@ nci_adapter_need_presence_checks(
 {
     const NciAdapterIntfInfo* intf = self->priv->active_intf;
 
-    /* NFC-DEP presence checks are done at LLCP level by NFC core */
-    return (self->target && intf && intf->protocol != NCI_PROTOCOL_NFC_DEP);
+    /*
+     * NFC-DEP presence checks are done at LLCP level by NFC core. The
+     * proprietary interface (MIFARE Classic) has no safe way to probe
+     * the tag before the caller has authenticated to a sector, so skip
+     * periodic checks for it too - see MIFARE_TAG_TIMEOUT_SEC instead.
+     */
+    return (self->target && intf &&
+        intf->protocol != NCI_PROTOCOL_NFC_DEP &&
+        intf->protocol != NCI_PROTOCOL_PROPRIETARY);
 }
 
 static
@@ -539,6 +558,40 @@ nci_adapter_presence_check_timer(
         GDEBUG("Skipped presence check");
     }
     return G_SOURCE_CONTINUE;
+}
+
+static
+gboolean
+nci_adapter_mifare_timeout(
+    gpointer user_data)
+{
+    NciAdapter* self = THIS(user_data);
+
+    GDEBUG("MIFARE Classic tag idle, returning to discovery");
+    self->priv->mifare_timeout = 0;
+    nci_core_set_state(self->nci, NCI_RFST_DISCOVERY);
+    return G_SOURCE_REMOVE;
+}
+
+static
+void
+nci_adapter_arm_mifare_timeout(
+    NciAdapter* self)
+{
+    gutil_source_clear(&self->priv->mifare_timeout);
+    self->priv->mifare_timeout = g_timeout_add_seconds(
+        MIFARE_TAG_TIMEOUT_SEC, nci_adapter_mifare_timeout, self);
+}
+
+/* Called from nci_target.c on every MIFARE transmit, to keep an active
+ * auth+read sweep from being cut off by MIFARE_TAG_TIMEOUT_SEC. */
+void
+nci_adapter_renew_mifare_timeout(
+    NciAdapter* self)
+{
+    if (self && self->priv->mifare_timeout) {
+        nci_adapter_arm_mifare_timeout(self);
+    }
 }
 
 static
@@ -834,11 +887,39 @@ nci_adapter_create_known_tag(
             }
         }
         break;
+    case NCI_PROTOCOL_PROPRIETARY:
+        if (ntf->rf_intf == NCI_RF_INTERFACE_PROPRIETARY) {
+            switch (ntf->mode) {
+            case NCI_MODE_PASSIVE_POLL_A:
+                /* See nci_target.c for the MIFARE Classic background */
+                tag = nfc_adapter_add_tag_mifare_classic(NFC_ADAPTER(self),
+                    target, nci_adapter_convert_poll_a(&poll_a, mp));
+                if (tag) {
+                    /* See MIFARE_TAG_TIMEOUT_SEC - no presence check
+                     * means no other way to eventually let go of this
+                     * tag and get back to discovery. */
+                    nci_adapter_arm_mifare_timeout(self);
+                }
+                break;
+            case NCI_MODE_ACTIVE_POLL_A:
+            case NCI_MODE_PASSIVE_POLL_B:
+            case NCI_MODE_PASSIVE_POLL_F:
+            case NCI_MODE_ACTIVE_POLL_F:
+            case NCI_MODE_PASSIVE_POLL_15693:
+            case NCI_MODE_PASSIVE_LISTEN_A:
+            case NCI_MODE_PASSIVE_LISTEN_B:
+            case NCI_MODE_PASSIVE_LISTEN_F:
+            case NCI_MODE_ACTIVE_LISTEN_A:
+            case NCI_MODE_ACTIVE_LISTEN_F:
+            case NCI_MODE_PASSIVE_LISTEN_15693:
+                break;
+            }
+        }
+        break;
     case NCI_PROTOCOL_T1T:
     case NCI_PROTOCOL_T3T:
     case NCI_PROTOCOL_T5T:
     case NCI_PROTOCOL_NFC_DEP:
-    case NCI_PROTOCOL_PROPRIETARY:
     case NCI_PROTOCOL_UNDETERMINED:
         break;
     }
@@ -1677,10 +1758,11 @@ nci_adapter_init(
     adapter->supported_modes = NFC_MODE_READER_WRITER |
         NFC_MODE_P2P_INITIATOR | NFC_MODE_P2P_TARGET |
         NFC_MODE_CARD_EMILATION;
-    adapter->supported_tags = NFC_TAG_TYPE_MIFARE_ULTRALIGHT;
+    adapter->supported_tags = NFC_TAG_TYPE_MIFARE_ULTRALIGHT |
+        NFC_TAG_TYPE_MIFARE_CLASSIC;
     adapter->supported_protocols = NFC_PROTOCOL_T2_TAG |
         NFC_PROTOCOL_T4A_TAG | NFC_PROTOCOL_T4B_TAG |
-        NFC_PROTOCOL_NFC_DEP;
+        NFC_PROTOCOL_NFC_DEP | NFC_PROTOCOL_MIFARE_CLASSIC;
 }
 
 static

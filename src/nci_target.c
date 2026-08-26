@@ -373,6 +373,19 @@ nci_target_transmit_finish_nfc_dep(
     return TRUE;
 }
 
+static
+gboolean
+nci_target_transmit_finish_mifare(
+    NfcTarget* target,
+    const guint8* payload,
+    guint len)
+{
+    /* No NFC-Forum response framing on the proprietary interface - the
+     * vendor HAL already normalizes what comes back, so passthrough. */
+    nfc_target_transmit_done(target, NFC_TRANSMIT_STATUS_OK, payload, len);
+    return TRUE;
+}
+
 /*==========================================================================*
  * Interface
  *==========================================================================*/
@@ -438,6 +451,16 @@ nci_target_new(
         case NCI_PROTOCOL_NFC_DEP:
             protocol = NFC_PROTOCOL_NFC_DEP;
             break;
+        case NCI_PROTOCOL_PROPRIETARY:
+            /*
+             * MIFARE Classic has no standard NCI protocol/RF interface -
+             * NFC Forum delegates it entirely to NCI_RF_INTERFACE_PROPRIETARY
+             * (also 0x80). On NXP controllers the vendor HAL auto-maps this
+             * and handles Crypto1 auth internally; we just recognize the
+             * activation. Auth/read command encoding is the caller's job.
+             */
+            protocol = NFC_PROTOCOL_MIFARE_CLASSIC;
+            break;
         default:
             GDEBUG("Unsupported protocol 0x%02x", ntf->protocol);
             break;
@@ -468,6 +491,11 @@ nci_target_new(
             case NCI_RF_INTERFACE_NFC_DEP:
                 tx_timeout = 0; /* Rely on CORE_INTERFACE_ERROR_NTF */
                 transmit_finish = nci_target_transmit_finish_nfc_dep;
+                break;
+            case NCI_RF_INTERFACE_PROPRIETARY:
+                if (ntf->protocol == NCI_PROTOCOL_PROPRIETARY) {
+                    transmit_finish = nci_target_transmit_finish_mifare;
+                }
                 break;
             default:
                 GDEBUG("Unsupported RF interface 0x%02x", ntf->rf_intf);
@@ -543,6 +571,10 @@ nci_target_transmit(
         g_bytes_unref(bytes);
         if (self->send_in_progress) {
             self->transmit_in_progress = TRUE;
+            if (target->protocol == NFC_PROTOCOL_MIFARE_CLASSIC) {
+                /* Reset MIFARE_TAG_TIMEOUT_SEC on real activity */
+                nci_adapter_renew_mifare_timeout(adapter);
+            }
             return TRUE;
         }
     }
