@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2026 Jolla Mobile Ltd
  * Copyright (C) 2019-2025 Slava Monich <slava@monich.com>
  * Copyright (C) 2019-2021 Jolla Ltd.
  * Copyright (C) 2020 Open Mobile Platform LLC.
@@ -340,16 +341,16 @@ nci_adapter_info_mode_params_matches(
                 break;
             }
             break;
-        case NCI_MODE_ACTIVE_POLL_A:
+        case NCI_MODE_ACTIVE_POLL:
         case NCI_MODE_PASSIVE_POLL_F:
-        case NCI_MODE_ACTIVE_POLL_F:
-        case NCI_MODE_PASSIVE_POLL_15693:
+        case NCI_MODE_PASSIVE_POLL_V:
         case NCI_MODE_PASSIVE_LISTEN_A:
         case NCI_MODE_PASSIVE_LISTEN_B:
         case NCI_MODE_PASSIVE_LISTEN_F:
-        case NCI_MODE_ACTIVE_LISTEN_A:
-        case NCI_MODE_ACTIVE_LISTEN_F:
-        case NCI_MODE_PASSIVE_LISTEN_15693:
+        case NCI_MODE_ACTIVE_LISTEN:
+        case NCI_MODE_RFU_05:
+        case NCI_MODE_RFU_85:
+        case NCI_MODE_RFU_86:
             break;
         }
     }
@@ -737,12 +738,15 @@ static
 const NfcParamNfcDepInitiator*
 nci_adapter_convert_nfc_dep_poll(
     NfcParamNfcDepInitiator* dest,
-    const NciActivationParam* ap)
+    const NciModeParam* mp,
+    const NciActivationParam* ap,
+    gboolean active)
 {
-    if (ap) {
-        const NciActivationParamNfcDepPoll* src = &ap->nfc_dep_poll;
+    const NciAtrRes* atr_res = ap ? &ap->nfc_dep_poll :
+        (mp && active) ? &mp->poll_active : NULL;
 
-        dest->atr_res_g = src->g;
+    if (atr_res) {
+        dest->atr_res_g = atr_res->g;
         return dest;
     } else {
         return NULL;
@@ -753,12 +757,15 @@ static
 const NfcParamNfcDepTarget*
 nci_adapter_convert_nfc_dep_listen(
     NfcParamNfcDepTarget* dest,
-    const NciActivationParam* ap)
+    const NciModeParam* mp,
+    const NciActivationParam* ap,
+    gboolean active)
 {
-    if (ap) {
-        const NciActivationParamNfcDepListen* src = &ap->nfc_dep_listen;
+    const NciAtrReq* atr_req = ap ? &ap->nfc_dep_listen :
+        (mp && active) ? &mp->listen_active : NULL;
 
-        dest->atr_req_g = src->g;
+    if (atr_req) {
+        dest->atr_req_g = atr_req->g;
         return dest;
     } else {
         return NULL;
@@ -786,21 +793,21 @@ nci_adapter_create_known_tag(
         if (ntf->rf_intf == NCI_RF_INTERFACE_FRAME) {
             switch (ntf->mode) {
             case NCI_MODE_PASSIVE_POLL_A:
-            case NCI_MODE_ACTIVE_POLL_A:
+            case NCI_MODE_ACTIVE_POLL:
                 /* Type 2 Tag */
                 tag = nfc_adapter_add_tag_t2(NFC_ADAPTER(self), target,
                     nci_adapter_convert_poll_a(&poll_a, mp));
                 break;
             case NCI_MODE_PASSIVE_POLL_B:
             case NCI_MODE_PASSIVE_POLL_F:
-            case NCI_MODE_ACTIVE_POLL_F:
-            case NCI_MODE_PASSIVE_POLL_15693:
+            case NCI_MODE_PASSIVE_POLL_V:
             case NCI_MODE_PASSIVE_LISTEN_A:
             case NCI_MODE_PASSIVE_LISTEN_B:
             case NCI_MODE_PASSIVE_LISTEN_F:
-            case NCI_MODE_ACTIVE_LISTEN_A:
-            case NCI_MODE_ACTIVE_LISTEN_F:
-            case NCI_MODE_PASSIVE_LISTEN_15693:
+            case NCI_MODE_ACTIVE_LISTEN:
+            case NCI_MODE_RFU_05:
+            case NCI_MODE_RFU_85:
+            case NCI_MODE_RFU_86:
                 break;
             }
         }
@@ -820,16 +827,16 @@ nci_adapter_create_known_tag(
                     nci_adapter_convert_poll_b(&poll_b, mp),
                     nci_adapter_convert_iso_dep_poll_b(&iso_dep_poll_b, ap));
                 break;
-            case NCI_MODE_ACTIVE_POLL_A:
+            case NCI_MODE_ACTIVE_POLL:
             case NCI_MODE_PASSIVE_POLL_F:
-            case NCI_MODE_ACTIVE_POLL_F:
-            case NCI_MODE_PASSIVE_POLL_15693:
+            case NCI_MODE_PASSIVE_POLL_V:
             case NCI_MODE_PASSIVE_LISTEN_A:
             case NCI_MODE_PASSIVE_LISTEN_B:
             case NCI_MODE_PASSIVE_LISTEN_F:
-            case NCI_MODE_ACTIVE_LISTEN_A:
-            case NCI_MODE_ACTIVE_LISTEN_F:
-            case NCI_MODE_PASSIVE_LISTEN_15693:
+            case NCI_MODE_ACTIVE_LISTEN:
+            case NCI_MODE_RFU_05:
+            case NCI_MODE_RFU_85:
+            case NCI_MODE_RFU_86:
                 break;
             }
         }
@@ -863,28 +870,30 @@ nci_adapter_create_peer_initiator(
     case NCI_PROTOCOL_NFC_DEP:
         if (ntf->rf_intf == NCI_RF_INTERFACE_NFC_DEP) {
             switch (ntf->mode) {
-            case NCI_MODE_ACTIVE_POLL_A:
+            case NCI_MODE_ACTIVE_POLL:
             case NCI_MODE_PASSIVE_POLL_A:
-                /* NFC-DEP (Poll side) */
+                /* NFC-DEP (NFC-A Poll) */
                 peer = nfc_adapter_add_peer_initiator_a(NFC_ADAPTER(self),
                     target, nci_adapter_convert_poll_a(&poll_a, mp),
-                    nci_adapter_convert_nfc_dep_poll(&nfc_dep, ap));
+                    nci_adapter_convert_nfc_dep_poll(&nfc_dep, mp, ap,
+                    ntf->mode == NCI_MODE_ACTIVE_POLL));
                 break;
-            case NCI_MODE_ACTIVE_POLL_F:
+            case NCI_MODE_ACTIVE_POLL_F: /* NCI_MODE_RFU_05 */
             case NCI_MODE_PASSIVE_POLL_F:
-                /* NFC-DEP (Poll side) */
+                /* NFC-DEP (NFC-F Poll) */
                 peer = nfc_adapter_add_peer_initiator_f(NFC_ADAPTER(self),
                     target, nci_adapter_convert_poll_f(&poll_f, mp),
-                    nci_adapter_convert_nfc_dep_poll(&nfc_dep, ap));
+                    nci_adapter_convert_nfc_dep_poll(&nfc_dep, mp, ap,
+                    ntf->mode == NCI_MODE_ACTIVE_POLL_F));
                 break;
-            case NCI_MODE_ACTIVE_LISTEN_A:
+            case NCI_MODE_ACTIVE_LISTEN:
             case NCI_MODE_PASSIVE_LISTEN_A:
             case NCI_MODE_PASSIVE_POLL_B:
-            case NCI_MODE_PASSIVE_POLL_15693:
+            case NCI_MODE_PASSIVE_POLL_V:
             case NCI_MODE_PASSIVE_LISTEN_B:
             case NCI_MODE_PASSIVE_LISTEN_F:
-            case NCI_MODE_ACTIVE_LISTEN_F:
-            case NCI_MODE_PASSIVE_LISTEN_15693:
+            case NCI_MODE_RFU_85:
+            case NCI_MODE_RFU_86:
                 break;
             }
         }
@@ -917,27 +926,29 @@ nci_adapter_create_peer_target(
     switch (ntf->rf_intf) {
     case NCI_RF_INTERFACE_NFC_DEP:
         switch (ntf->mode) {
-        case NCI_MODE_ACTIVE_LISTEN_A:
+        case NCI_MODE_ACTIVE_LISTEN:
         case NCI_MODE_PASSIVE_LISTEN_A:
-            /* NFC-DEP (Listen side) */
+            /* NFC-DEP (NFC-A Listen) */
             peer = nfc_adapter_add_peer_target_a(NFC_ADAPTER(self), initiator,
-                NULL, nci_adapter_convert_nfc_dep_listen(&nfc_dep, ap));
+                NULL, nci_adapter_convert_nfc_dep_listen(&nfc_dep, mp, ap,
+                ntf->mode == NCI_MODE_ACTIVE_LISTEN));
             break;
+        case NCI_MODE_ACTIVE_LISTEN_F: /* NCI_MODE_RFU_85 */
         case NCI_MODE_PASSIVE_LISTEN_F:
-        case NCI_MODE_ACTIVE_LISTEN_F:
-            /* NFC-DEP (Listen side) */
+            /* NFC-DEP (NFC-F Listen) */
             peer = nfc_adapter_add_peer_target_f(NFC_ADAPTER(self), initiator,
                 nci_adapter_convert_listen_f(&listen_f, mp),
-                nci_adapter_convert_nfc_dep_listen(&nfc_dep, ap));
+                nci_adapter_convert_nfc_dep_listen(&nfc_dep, mp, ap,
+                ntf->mode == NCI_MODE_ACTIVE_LISTEN_F));
             break;
-        case NCI_MODE_ACTIVE_POLL_A:
+        case NCI_MODE_ACTIVE_POLL:
         case NCI_MODE_PASSIVE_POLL_A:
         case NCI_MODE_PASSIVE_POLL_B:
         case NCI_MODE_PASSIVE_POLL_F:
-        case NCI_MODE_ACTIVE_POLL_F:
-        case NCI_MODE_PASSIVE_POLL_15693:
+        case NCI_MODE_PASSIVE_POLL_V:
         case NCI_MODE_PASSIVE_LISTEN_B:
-        case NCI_MODE_PASSIVE_LISTEN_15693:
+        case NCI_MODE_RFU_05:
+        case NCI_MODE_RFU_86:
             break;
         }
         break;
@@ -992,16 +1003,16 @@ nci_adapter_get_mode_param(
             return poll;
         }
         break;
-    case NCI_MODE_ACTIVE_POLL_A:
+    case NCI_MODE_ACTIVE_POLL:
     case NCI_MODE_PASSIVE_POLL_F:
-    case NCI_MODE_ACTIVE_POLL_F:
-    case NCI_MODE_PASSIVE_POLL_15693:
+    case NCI_MODE_RFU_05:
+    case NCI_MODE_PASSIVE_POLL_V:
     case NCI_MODE_PASSIVE_LISTEN_A:
     case NCI_MODE_PASSIVE_LISTEN_B:
     case NCI_MODE_PASSIVE_LISTEN_F:
-    case NCI_MODE_ACTIVE_LISTEN_A:
-    case NCI_MODE_ACTIVE_LISTEN_F:
-    case NCI_MODE_PASSIVE_LISTEN_15693:
+    case NCI_MODE_ACTIVE_LISTEN:
+    case NCI_MODE_RFU_85:
+    case NCI_MODE_RFU_86:
         break;
     }
     return NULL;

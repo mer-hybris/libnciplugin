@@ -8,7 +8,7 @@ URL: https://github.com/mer-hybris/libnciplugin
 Source: %{name}-%{version}.tar.bz2
 
 %define nfcd_version 1.2.4
-%define libncicore_version 1.1.31
+%define libncicore_version 1.2.0
 %define libglibutil_version 1.0.79
 %define glib_version 2.32
 
