@@ -1,3 +1,9 @@
+libnciplugin (1.2.3) unstable; urgency=low
+
+  * Handle NCI 2.0 RF_INTF_ACTIVATED_NTF extensions
+
+ -- Slava Monich <slava.monich@jolla.com>  Mon, 28 Sep 2026 18:37:27 +0300
+
 libnciplugin (1.2.2) unstable; urgency=low
 
   * Support for LI_A_HB adapter parameter

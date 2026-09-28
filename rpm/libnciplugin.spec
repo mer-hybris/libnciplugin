@@ -1,6 +1,6 @@
 Name: libnciplugin
 
-Version: 1.2.2
+Version: 1.2.3
 Release: 0
 Summary: Support library for NCI-based nfcd plugins
 License: BSD
@@ -28,7 +28,6 @@ BuildRequires: pkgconfig(rpm)
 Requires: glib2 >= %{glib_version}
 Requires: libglibutil >= %{libglibutil_version}
 Requires: libncicore >= %{libncicore_version}
-Requires: nfcd >= %{nfcd_version}
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
@@ -56,14 +55,12 @@ make LIBDIR=%{_libdir} DESTDIR=%{buildroot} install-dev
 %postun -p /sbin/ldconfig
 
 %files
-%defattr(-,root,root,-)
 %{_libdir}/%{name}.so.*
 %if %{license_support} == 0
 %license LICENSE
 %endif
 
 %files devel
-%defattr(-,root,root,-)
 %dir %{_includedir}/nciplugin
 %{_libdir}/pkgconfig/*.pc
 %{_libdir}/%{name}.so
